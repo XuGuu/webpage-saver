@@ -76,7 +76,7 @@ python save_webpage.py "https://xxx" --flat
 | 公众号 | requests + trafilatura | 不需要 |
 | 小红书 | curl_cffi | 不需要 |
 | 知乎 | DrissionPage + Chrome | 部分页面需要 |
-| CSDN | requests + BeautifulSoup | 不需要 |
+| CSDN | 多方案自动降级（API → 手机版 → curl_cffi → print 模式） | 部分文章需要 |
 | IT之家 | requests + trafilatura | 不需要 |
 | 其他新闻站 | requests + trafilatura | 不需要 |
 
@@ -94,6 +94,9 @@ A: 小红书反爬较强，偶尔会被限制。等几分钟重试即可。
 
 **Q: 知乎提示需要 Chrome？**
 A: 知乎有 JS 挑战，必须用真实浏览器。点「启动 Chrome」，然后在弹出的 Chrome 中登录知乎。
+
+**Q: CSDN 抓不到全文？**
+A: CSDN 部分文章需要登录才能看全文。工具会自动尝试多种方案绕过，如果仍然失败，会在日志中提示。
 
 **Q: Mac 能用吗？**
 A: 能。Chrome 路径会自动检测，安装方式一样。

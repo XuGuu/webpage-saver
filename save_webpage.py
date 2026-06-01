@@ -330,7 +330,7 @@ def _csdn_parse_html(html: str, url: str) -> dict:
             tag.decompose()
         content_html = str(content_el)
         md = trafilatura.extract(content_html, output_format="markdown", url=url,
-                                 include_links=True, include_images=False) or ""
+                                 include_links=True, include_images=True) or ""
     else:
         md = ""
 
@@ -524,6 +524,18 @@ def generate_html(data: dict, img_files: list[str | None], img_dir: str, embed_i
 
     md = re.sub(r'!\[([^\]]*)\]\(([^\)]+)\)', replace_img_url, md)
 
+    # 如果 markdown 中没有图片标记，但有图片，追加到末尾
+    if "![" not in md and img_files and any(img_files):
+        md += "\n\n## 图片\n\n"
+        for i, (orig_url, local_file) in enumerate(zip(data.get("images", []), img_files)):
+            if local_file:
+                if embed_images:
+                    full_path = os.path.join(img_dir, local_file)
+                    src = _img_to_base64(full_path)
+                    md += f"![图片{i + 1}]({src})\n\n"
+                else:
+                    md += f"![图片{i + 1}](images/{local_file})\n\n"
+
     # Markdown 转简单 HTML
     html_body = md
     html_body = re.sub(r'^# (.+)$', r'<h1>\1</h1>', html_body, flags=re.MULTILINE)
@@ -681,7 +693,7 @@ def save_article(url: str, output_dir: str, formats: list[str] | None = None,
 
     # 生成 HTML
     if "html" in formats:
-        embed = not keep_images and img_files  # 不保留图片文件夹时，图片嵌入 HTML
+        embed = not keep_images  # 不保留图片文件夹时，图片嵌入 HTML
         html_content = generate_html(data, img_files, img_dir, embed_images=embed)
         html_path = os.path.join(article_dir, f"{safe_title}.html")
         with open(html_path, "w", encoding="utf-8") as f:
