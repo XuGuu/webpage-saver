@@ -107,11 +107,14 @@ def download_images(urls: list[str], save_dir: str, referer: str = "") -> list[s
 
 def extract_wechat(url: str) -> dict:
     """公众号文章提取。"""
+    from bs4 import BeautifulSoup
+
     r = requests.get(url, headers=HEADERS, timeout=20)
     r.raise_for_status()
     if r.encoding and r.encoding.lower() != "utf-8":
         r.encoding = r.apparent_encoding
     html = r.text
+    soup = BeautifulSoup(html, "html.parser")
 
     # 标题
     title = ""
@@ -133,18 +136,39 @@ def extract_wechat(url: str) -> dict:
     author_m = re.search(r'id="js_name"[^>]*>(.*?)<', html, re.DOTALL)
     author = author_m.group(1).strip() if author_m else ""
 
-    # 正文 Markdown
-    md = trafilatura.extract(html, output_format="markdown", url=url,
-                             include_links=True, include_images=False) or ""
-
-    # 图片
-    from bs4 import BeautifulSoup
-    soup = BeautifulSoup(html, "html.parser")
+    # 正文：从 HTML 中提取，保留图片位置
+    content = soup.find("div", id="js_content")
     img_urls = []
-    for img in soup.find_all("img"):
-        src = img.get("data-src") or img.get("src")
-        if src and "mmbiz" in src and not src.startswith("data:"):
-            img_urls.append(src)
+    md_parts = []
+
+    if content:
+        for child in content.children:
+            if child.name == "img":
+                src = child.get("data-src") or child.get("src", "")
+                if src and "mmbiz" in src and not src.startswith("data:"):
+                    img_urls.append(src)
+                    md_parts.append(f"![图片{len(img_urls)}]({src})")
+            elif child.name in ["p", "section", "h1", "h2", "h3", "h4"]:
+                imgs_in_child = child.find_all("img")
+                if imgs_in_child:
+                    for img in imgs_in_child:
+                        src = img.get("data-src") or img.get("src", "")
+                        if src and "mmbiz" in src and not src.startswith("data:"):
+                            img_urls.append(src)
+                            md_parts.append(f"![图片{len(img_urls)}]({src})")
+                else:
+                    text = child.get_text(strip=True)
+                    if text:
+                        md_parts.append(text)
+        md = "\n\n".join(md_parts)
+    else:
+        # 兜底：用 trafilatura
+        md = trafilatura.extract(html, output_format="markdown", url=url,
+                                 include_links=True, include_images=False) or ""
+        for img in soup.find_all("img"):
+            src = img.get("data-src") or img.get("src")
+            if src and "mmbiz" in src and not src.startswith("data:"):
+                img_urls.append(src)
 
     return {"title": title, "author": author, "markdown": md, "images": img_urls, "site": "公众号"}
 

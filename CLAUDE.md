@@ -8,10 +8,11 @@
 ## 技术栈
 
 - Python 3.10+
-- requests + trafilatura（公众号、新闻站）
+- requests + BeautifulSoup（公众号，保留图片位置）
 - curl_cffi（小红书，模拟 TLS 指纹绕过反爬）
 - DrissionPage（知乎，接管用户 Chrome）
 - requests + BeautifulSoup + trafilatura（CSDN，多方案自动降级）
+- requests + trafilatura（新闻站）
 - tkinter（GUI，Python 内置）
 
 ## 文件结构

@@ -73,7 +73,7 @@ python save_webpage.py "https://xxx" --flat
 
 | 网站 | 方式 | 需要登录 |
 |------|------|---------|
-| 公众号 | requests + trafilatura | 不需要 |
+| 公众号 | requests + BeautifulSoup（保留图片位置） | 不需要 |
 | 小红书 | curl_cffi | 不需要 |
 | 知乎 | DrissionPage + Chrome | 部分页面需要 |
 | CSDN | 多方案自动降级（API → 手机版 → curl_cffi → print 模式） | 部分文章需要 |
