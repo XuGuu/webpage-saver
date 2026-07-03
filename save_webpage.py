@@ -105,15 +105,38 @@ def download_images(urls: list[str], save_dir: str, referer: str = "") -> list[s
 
 # ==================== 提取器：公众号 ====================
 
-def extract_wechat(url: str) -> dict:
-    """公众号文章提取。"""
+def _collect_wechat_content(el, md_parts: list, img_urls: list):
+    """按文档顺序递归收集文字和图片，图文混排的盒子两者都要。"""
+    from bs4 import NavigableString, Comment
+
+    for child in el.children:
+        if isinstance(child, Comment):
+            continue
+        if isinstance(child, NavigableString):
+            # 裸露在盒子里的文字（没有标签包裹）
+            text = str(child).strip()
+            if text:
+                md_parts.append(text)
+        elif child.name == "img":
+            src = child.get("data-src") or child.get("src", "")
+            if src and "mmbiz" in src and not src.startswith("data:"):
+                img_urls.append(src)
+                md_parts.append(f"![图片{len(img_urls)}]({src})")
+        elif child.name in ("script", "style"):
+            continue
+        elif child.find("img") is not None:
+            # 盒子里同时有图片和文字：递归进去按顺序收集，不能只取图丢字
+            _collect_wechat_content(child, md_parts, img_urls)
+        else:
+            text = child.get_text(strip=True)
+            if text:
+                md_parts.append(text)
+
+
+def parse_wechat_html(html: str, url: str = "") -> dict:
+    """从公众号页面 HTML 解析出标题、作者、正文和图片。"""
     from bs4 import BeautifulSoup
 
-    r = requests.get(url, headers=HEADERS, timeout=20)
-    r.raise_for_status()
-    if r.encoding and r.encoding.lower() != "utf-8":
-        r.encoding = r.apparent_encoding
-    html = r.text
     soup = BeautifulSoup(html, "html.parser")
 
     # 标题
@@ -142,28 +165,11 @@ def extract_wechat(url: str) -> dict:
     md_parts = []
 
     if content:
-        for child in content.children:
-            if child.name == "img":
-                src = child.get("data-src") or child.get("src", "")
-                if src and "mmbiz" in src and not src.startswith("data:"):
-                    img_urls.append(src)
-                    md_parts.append(f"![图片{len(img_urls)}]({src})")
-            elif child.name in ["p", "section", "h1", "h2", "h3", "h4"]:
-                imgs_in_child = child.find_all("img")
-                if imgs_in_child:
-                    for img in imgs_in_child:
-                        src = img.get("data-src") or img.get("src", "")
-                        if src and "mmbiz" in src and not src.startswith("data:"):
-                            img_urls.append(src)
-                            md_parts.append(f"![图片{len(img_urls)}]({src})")
-                else:
-                    text = child.get_text(strip=True)
-                    if text:
-                        md_parts.append(text)
+        _collect_wechat_content(content, md_parts, img_urls)
         md = "\n\n".join(md_parts)
     else:
         # 兜底：用 trafilatura
-        md = trafilatura.extract(html, output_format="markdown", url=url,
+        md = trafilatura.extract(html, output_format="markdown", url=url or None,
                                  include_links=True, include_images=False) or ""
         for img in soup.find_all("img"):
             src = img.get("data-src") or img.get("src")
@@ -171,6 +177,15 @@ def extract_wechat(url: str) -> dict:
                 img_urls.append(src)
 
     return {"title": title, "author": author, "markdown": md, "images": img_urls, "site": "公众号"}
+
+
+def extract_wechat(url: str) -> dict:
+    """公众号文章提取：下载页面后交给 parse_wechat_html 解析。"""
+    r = requests.get(url, headers=HEADERS, timeout=20)
+    r.raise_for_status()
+    if r.encoding and r.encoding.lower() != "utf-8":
+        r.encoding = r.apparent_encoding
+    return parse_wechat_html(r.text, url=url)
 
 
 # ==================== 提取器：小红书 ====================

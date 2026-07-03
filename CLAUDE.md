@@ -20,6 +20,7 @@
 ```
 save_webpage.py       核心逻辑（提取、下载、生成）
 gui.py                图形界面（格式选择、目录记忆）
+test_save_webpage.py  单元测试（python3 -m unittest test_save_webpage）
 requirements.txt      依赖清单
 setup_windows.bat     Windows 一键启动
 setup_mac.sh          Mac 一键启动

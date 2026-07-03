@@ -3,4 +3,3 @@ beautifulsoup4
 trafilatura
 curl_cffi
 DrissionPage
-playwright
