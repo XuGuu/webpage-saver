@@ -105,8 +105,40 @@ def download_images(urls: list[str], save_dir: str, referer: str = "") -> list[s
 
 # ==================== 提取器：公众号 ====================
 
+_HEADING_TAGS = ("h1", "h2", "h3", "h4", "h5", "h6")
+_STRUCTURE_TAGS = _HEADING_TAGS + ("ul", "ol", "blockquote")
+
+
+def _inline_md(el) -> str:
+    """行内感知的文本提取：strong/b 包成 **加粗**，跳过脚本样式。
+
+    空白折叠为单个空格（保住英文单词边界），调用方对结果 strip()。
+    """
+    from bs4 import NavigableString, Comment
+
+    parts = []
+    for child in el.children:
+        if isinstance(child, Comment):
+            continue
+        if isinstance(child, NavigableString):
+            parts.append(re.sub(r'\s+', ' ', str(child)))
+        elif child.name in ("script", "style"):
+            continue
+        elif child.name in ("strong", "b"):
+            inner = _inline_md(child).strip()
+            if not inner:
+                continue
+            if inner.startswith("**") and inner.endswith("**"):
+                parts.append(inner)  # 嵌套加粗（strong 套 b）不重复包
+            else:
+                parts.append(f"**{inner}**")
+        else:
+            parts.append(_inline_md(child))
+    return "".join(parts)
+
+
 def _collect_wechat_content(el, md_parts: list, img_urls: list):
-    """按文档顺序递归收集文字和图片，图文混排的盒子两者都要。"""
+    """按文档顺序递归收集文字和图片，保留标题/列表/引用/加粗结构。"""
     from bs4 import NavigableString, Comment
 
     for child in el.children:
@@ -124,11 +156,33 @@ def _collect_wechat_content(el, md_parts: list, img_urls: list):
                 md_parts.append(f"![图片{len(img_urls)}]({src})")
         elif child.name in ("script", "style"):
             continue
-        elif child.find("img") is not None:
-            # 盒子里同时有图片和文字：递归进去按顺序收集，不能只取图丢字
+        elif child.name in _HEADING_TAGS and child.find("img") is None:
+            # 标题：h1→#、h2→##……h4 以下封顶为 ####
+            text = child.get_text(strip=True)
+            if text:
+                level = min(int(child.name[1]), 4)
+                md_parts.append("#" * level + " " + text)
+        elif child.name in ("ul", "ol") and child.find("img") is None:
+            # 列表：每个直接子条目一行
+            items = []
+            for i, li in enumerate(child.find_all("li", recursive=False), 1):
+                t = _inline_md(li).strip()
+                if t:
+                    items.append(f"- {t}" if child.name == "ul" else f"{i}. {t}")
+            if items:
+                md_parts.append("\n".join(items))
+        elif child.name == "blockquote" and child.find("img") is None:
+            # 引用块：每行加 > 前缀
+            text = _inline_md(child).strip()
+            if text:
+                md_parts.append("\n".join(
+                    "> " + ln.strip() for ln in text.splitlines() if ln.strip()))
+        elif child.find(["img", *_STRUCTURE_TAGS]) is not None:
+            # 盒子里藏着图片或结构元素：递归深入按顺序收集
+            # （含图的标题/列表/引用也走这里——不丢图优先于保结构）
             _collect_wechat_content(child, md_parts, img_urls)
         else:
-            text = child.get_text(strip=True)
+            text = _inline_md(child).strip()
             if text:
                 md_parts.append(text)
 
@@ -577,9 +631,27 @@ def generate_html(data: dict, img_files: list[str | None], img_dir: str, embed_i
 
     # Markdown 转简单 HTML
     html_body = md
-    html_body = re.sub(r'^# (.+)$', r'<h1>\1</h1>', html_body, flags=re.MULTILINE)
-    html_body = re.sub(r'^## (.+)$', r'<h2>\1</h2>', html_body, flags=re.MULTILINE)
+    html_body = re.sub(r'^#### (.+)$', r'<h4>\1</h4>', html_body, flags=re.MULTILINE)
     html_body = re.sub(r'^### (.+)$', r'<h3>\1</h3>', html_body, flags=re.MULTILINE)
+    html_body = re.sub(r'^## (.+)$', r'<h2>\1</h2>', html_body, flags=re.MULTILINE)
+    html_body = re.sub(r'^# (.+)$', r'<h1>\1</h1>', html_body, flags=re.MULTILINE)
+    # 列表：连续的 "- " / "n. " 行转为 <ul>/<ol>
+    html_body = re.sub(
+        r'((?:^- .+(?:\n|$))+)',
+        lambda m: "<ul>" + "".join(
+            f"<li>{ln[2:]}</li>" for ln in m.group(1).strip().splitlines()) + "</ul>\n",
+        html_body, flags=re.MULTILINE)
+    html_body = re.sub(
+        r'((?:^\d+\. .+(?:\n|$))+)',
+        lambda m: "<ol>" + "".join(
+            f"<li>{ln.split('. ', 1)[-1]}</li>" for ln in m.group(1).strip().splitlines()) + "</ol>\n",
+        html_body, flags=re.MULTILINE)
+    # 引用块：连续的 "> " 行转为 <blockquote>
+    html_body = re.sub(
+        r'((?:^> .+(?:\n|$))+)',
+        lambda m: "<blockquote>" + "<br>".join(
+            ln[2:] for ln in m.group(1).strip().splitlines()) + "</blockquote>\n",
+        html_body, flags=re.MULTILINE)
     html_body = re.sub(r'\*\*(.+?)\*\*', r'<strong>\1</strong>', html_body)
     html_body = re.sub(r'`([^`]+)`', r'<code>\1</code>', html_body)
     html_body = re.sub(r'!\[([^\]]*)\]\(([^\)]+)\)', r'<img src="\2" alt="\1" style="max-width:100%;border-radius:8px;margin:12px 0">', html_body)
@@ -587,6 +659,11 @@ def generate_html(data: dict, img_files: list[str | None], img_dir: str, embed_i
     html_body = re.sub(r'\n\n+', '</p><p>', html_body)
     html_body = f"<p>{html_body}</p>"
     html_body = html_body.replace('\n', '<br>')
+    # 块级元素不该包在 <p> 里：清理块后多余的 <br>，再把 <p> 解包
+    html_body = re.sub(r'(</(?:h[1-4]|ul|ol|blockquote)>)<br>', r'\1', html_body)
+    html_body = re.sub(
+        r'<p>((?:<(?:h[1-4]|ul|ol|blockquote)[^>]*>.*?</(?:h[1-4]|ul|ol|blockquote)>)+)</p>',
+        r'\1', html_body)
 
     site_badge = f'<span class="badge">{site}</span>' if site else ""
     author_line = f'<span class="author">{author}</span>' if author else ""
@@ -603,6 +680,11 @@ body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC
 h1 {{ font-size: 22px; margin-bottom: 8px; color: #1a1a1a; }}
 h2 {{ font-size: 18px; margin: 24px 0 12px; color: #333; }}
 h3 {{ font-size: 16px; margin: 20px 0 8px; color: #555; }}
+h4 {{ font-size: 15px; margin: 16px 0 8px; color: #555; }}
+.content ul, .content ol {{ margin: 12px 0; padding-left: 26px; }}
+.content li {{ margin: 6px 0; }}
+.content blockquote {{ border-left: 3px solid #ddd; margin: 12px 0; padding: 2px 16px;
+                       color: #666; background: #fafafa; border-radius: 0 6px 6px 0; }}
 .meta {{ color: #999; font-size: 13px; margin-bottom: 20px; padding-bottom: 16px; border-bottom: 1px solid #f0f0f0; }}
 .meta span {{ margin-right: 12px; }}
 .badge {{ background: #f0f0f0; padding: 2px 8px; border-radius: 4px; font-size: 12px; }}
