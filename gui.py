@@ -10,10 +10,12 @@ from tkinter import ttk, filedialog, messagebox
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from save_webpage import (save_article, check_cdp, launch_chrome_debug,
-                          detect_site, human_size, pick_url_from_clipboard, split_urls)
+                          detect_site, human_size, pick_url_from_clipboard,
+                          split_urls, format_share_text, build_index_html,
+                          open_file)
 
-# 配置文件路径
 CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
+INDEX_FILE = "目录.html"
 
 
 def load_config() -> dict:
@@ -35,16 +37,21 @@ class App:
     def __init__(self):
         self.root = tk.Tk()
         self.root.title("文章保存工具")
-        self.root.geometry("560x560")
+        self.root.geometry("580x680")
         self.root.resizable(False, False)
 
-        # 加载配置
         cfg = load_config()
         self.var_dir = tk.StringVar(value=cfg.get("save_dir", self._desktop()))
         self.var_html = tk.BooleanVar(value=cfg.get("html", True))
         self.var_md = tk.BooleanVar(value=cfg.get("markdown", True))
         self.var_img = tk.BooleanVar(value=cfg.get("images", True))
         self.var_subfolder = tk.BooleanVar(value=cfg.get("subfolder", True))
+        self.var_date_prefix = tk.BooleanVar(value=cfg.get("date_prefix", False))
+        self.var_auto_open = tk.BooleanVar(value=cfg.get("auto_open", True))
+
+        # 会话状态
+        self.session_successes = []  # [(url, result)] 用于复制所有成功文章
+        self.failed_urls = []    # 用于失败重试
 
         self._build_ui()
 
@@ -63,7 +70,6 @@ class App:
         self.txt_url.pack(fill="x")
         self.txt_url.focus()
 
-        # 自动从剪贴板取 URL
         try:
             clip = self.root.clipboard_get()
         except tk.TclError:
@@ -92,13 +98,15 @@ class App:
         ttk.Checkbutton(row_fmt, text="图片", variable=self.var_img).pack(side="left", padx=(16, 0))
 
         # ---- 目录结构 ----
-        frm_struct = ttk.LabelFrame(self.root, text="目录结构", padding=8)
+        frm_struct = ttk.LabelFrame(self.root, text="选项", padding=8)
         frm_struct.pack(fill="x", **pad)
 
-        ttk.Checkbutton(frm_struct, text="用文章标题新建文件夹存放（多选时建议开启）",
+        ttk.Checkbutton(frm_struct, text="用文章标题新建文件夹存放",
                         variable=self.var_subfolder).pack(anchor="w")
-        ttk.Label(frm_struct, text="开启: 文章标题/文章.html  |  关闭: 直接存到上面选的文件夹",
-                  foreground="gray", font=("", 9)).pack(anchor="w", pady=(2, 0))
+        ttk.Checkbutton(frm_struct, text="文件夹名前加日期(2026-06-26_标题)",
+                        variable=self.var_date_prefix).pack(anchor="w")
+        ttk.Checkbutton(frm_struct, text="保存完成后自动打开 HTML",
+                        variable=self.var_auto_open).pack(anchor="w")
 
         # ---- 按钮 ----
         frm_btn = ttk.Frame(self.root, padding=8)
@@ -107,7 +115,21 @@ class App:
         self.btn_run = ttk.Button(frm_btn, text="开始保存", command=self._run)
         self.btn_run.pack(side="left")
 
-        ttk.Button(frm_btn, text="启动 Chrome（知乎用）", command=self._launch_chrome).pack(side="left", padx=(12, 0))
+        ttk.Button(frm_btn, text="启动 Chrome（知乎用）",
+                   command=self._launch_chrome).pack(side="left", padx=(12, 0))
+
+        # 保存后可用的操作按钮(初始禁用)
+        frm_actions = ttk.Frame(self.root, padding=(12, 0))
+        frm_actions.pack(fill="x")
+        self.btn_copy = ttk.Button(frm_actions, text="📋 复制标题/作者/链接",
+                                   command=self._copy_share, state="disabled")
+        self.btn_copy.pack(side="left")
+        self.btn_index = ttk.Button(frm_actions, text="📚 打开目录",
+                                    command=self._open_index)
+        self.btn_index.pack(side="left", padx=(8, 0))
+        self.btn_retry = ttk.Button(frm_actions, text="🔁 重试失败",
+                                    command=self._retry_failed, state="disabled")
+        self.btn_retry.pack(side="left", padx=(8, 0))
 
         # ---- 日志 ----
         frm_log = ttk.LabelFrame(self.root, text="日志", padding=4)
@@ -138,13 +160,14 @@ class App:
             self.var_dir.set(d)
 
     def _save_prefs(self):
-        """保存用户偏好到配置文件。"""
         save_config({
             "save_dir": self.var_dir.get(),
             "html": self.var_html.get(),
             "markdown": self.var_md.get(),
             "images": self.var_img.get(),
             "subfolder": self.var_subfolder.get(),
+            "date_prefix": self.var_date_prefix.get(),
+            "auto_open": self.var_auto_open.get(),
         })
 
     def _launch_chrome(self):
@@ -164,21 +187,35 @@ class App:
             messagebox.showwarning("提示", "请输入至少一个 http(s) 开头的链接")
             return
 
-        # 至少选一个格式
         if not self.var_html.get() and not self.var_md.get() and not self.var_img.get():
             messagebox.showwarning("提示", "请至少选择一个保存格式")
             return
 
-        # 知乎检查(任一链接是知乎就要 Chrome)
         if any(detect_site(u) == "zhihu" for u in urls) and not check_cdp():
             messagebox.showwarning("提示", "有知乎链接,需要 Chrome\n请先点「启动 Chrome」并在 Chrome 中登录知乎")
             return
 
         self._save_prefs()
         self.btn_run.config(state="disabled")
+        self.btn_copy.config(state="disabled")
+        self.btn_retry.config(state="disabled")
         self.progress.start(10)
         self._log(f"--- 开始（共 {len(urls)} 篇）---")
+        self.failed_urls = []
+        self.session_successes = []
 
+        threading.Thread(target=self._do_save, args=(urls,), daemon=True).start()
+
+    def _retry_failed(self):
+        if not self.failed_urls:
+            return
+        urls = list(self.failed_urls)  # 拷贝一份
+        self._save_prefs()
+        self.btn_run.config(state="disabled")
+        self.btn_retry.config(state="disabled")
+        self.progress.start(10)
+        self._log(f"--- 重试 {len(urls)} 篇 ---")
+        self.failed_urls = []
         threading.Thread(target=self._do_save, args=(urls,), daemon=True).start()
 
     def _do_save(self, urls: list):
@@ -190,6 +227,8 @@ class App:
 
             ok_count = 0
             fail_count = 0
+            last_html_path = None
+
             for i, url in enumerate(urls, 1):
                 if len(urls) > 1:
                     self._log(f"[{i}/{len(urls)}] {url}")
@@ -199,10 +238,12 @@ class App:
                         formats=fmts,
                         use_subfolder=self.var_subfolder.get(),
                         log_fn=self._log,
+                        date_prefix=self.var_date_prefix.get(),
                     )
                     if result.get("error"):
                         self._log(f"  失败: {result['error']}")
                         fail_count += 1
+                        self.failed_urls.append(url)
                         continue
                     for f in result.get("files", []):
                         size = os.path.getsize(f)
@@ -210,25 +251,73 @@ class App:
                     if result.get("images"):
                         self._log(f"  图片: {len(result['images'])} 张")
                     ok_count += 1
+                    self.session_successes.append((url, result))
+                    # 记住最后一个 HTML 路径,供自动打开
+                    for f in result.get("files", []):
+                        if f.endswith(".html"):
+                            last_html_path = f
                 except Exception as e:
-                    # 兜住 save_article 里没转成 {"error":...} 的异常,不影响后续 URL
                     self._log(f"  失败: {e}")
                     fail_count += 1
+                    self.failed_urls.append(url)
 
             summary = (f"--- 完成: 成功 {ok_count} / 失败 {fail_count} ---"
                        if len(urls) > 1
                        else ("--- 完成 ---" if ok_count else "--- 失败 ---"))
             self._log(summary)
+
+            # 自动打开最后一个成功保存的 HTML
+            if last_html_path and self.var_auto_open.get():
+                open_file(last_html_path)
+
+            # 更新目录索引
+            try:
+                if self.var_subfolder.get() and ok_count > 0:
+                    index_path = os.path.join(self.var_dir.get(), INDEX_FILE)
+                    with open(index_path, "w", encoding="utf-8") as f:
+                        f.write(build_index_html(self.var_dir.get()))
+            except Exception as e:
+                self._log(f"（生成目录索引失败:{e}）")
+
             self._finish(ok_count == 0)
 
         except Exception as e:
             self._log(f"失败: {e}")
             self._finish(True)
 
+    def _copy_share(self):
+        if not self.session_successes:
+            return
+        blocks = [format_share_text(
+            {"title": r.get("title", ""),
+             "author": r.get("author", ""),
+             "date": r.get("date", "")},
+            url=u) for u, r in self.session_successes]
+        share = "\n\n".join(blocks)
+        self.root.clipboard_clear()
+        self.root.clipboard_append(share)
+        self._log(f"已复制 {len(blocks)} 篇到剪贴板")
+
+    def _open_index(self):
+        index_path = os.path.join(self.var_dir.get(), INDEX_FILE)
+        if not os.path.exists(index_path):
+            # 现场生成一次
+            try:
+                with open(index_path, "w", encoding="utf-8") as f:
+                    f.write(build_index_html(self.var_dir.get()))
+            except Exception as e:
+                messagebox.showerror("错误", f"生成目录失败:{e}")
+                return
+        open_file(index_path)
+
     def _finish(self, error: bool):
         def _do():
             self.progress.stop()
             self.btn_run.config(state="normal")
+            if self.session_successes:
+                self.btn_copy.config(state="normal")
+            if self.failed_urls:
+                self.btn_retry.config(state="normal")
         self.root.after(0, _do)
 
     def run(self):

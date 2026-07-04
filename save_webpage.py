@@ -52,6 +52,131 @@ def human_size(n: int) -> str:
     return f"{n / (1024 * 1024):.1f} MB"
 
 
+def build_toc(html_body: str) -> list:
+    """从生成的 HTML body 里提取标题层级,做 TOC 数据。"""
+    tocs = []
+    for m in re.finditer(r'<h([1-4])\b[^>]*>(.*?)</h\1>', html_body, re.DOTALL):
+        level = int(m.group(1))
+        text = re.sub(r'<[^>]+>', '', m.group(2)).strip()
+        if text:
+            tocs.append({"level": level, "text": text})
+    return tocs
+
+
+def format_share_text(data: dict, url: str = "") -> str:
+    """构造复制到剪贴板的分享文本。空字段自动省略,不留孤零零的分隔符。"""
+    lines = []
+    title = (data.get("title") or "").strip()
+    if title:
+        lines.append(title)
+    meta_bits = []
+    for key in ("author", "date"):
+        v = (data.get(key) or "").strip()
+        if v:
+            meta_bits.append(v)
+    if meta_bits:
+        lines.append(" · ".join(meta_bits))
+    if url:
+        lines.append(url)
+    return "\n".join(lines)
+
+
+def build_index_html(root_dir: str) -> str:
+    """扫描 root_dir 下含 .saved-article 标记的子文件夹里的 HTML,生成目录索引。"""
+    import html as _h
+    cards = []
+    if not os.path.isdir(root_dir):
+        return ""
+    entries = []
+    for name in os.listdir(root_dir):
+        sub = os.path.join(root_dir, name)
+        if not os.path.isdir(sub):
+            continue
+        # 只识别有 .saved-article 标记的目录(避免桌面上其他 HTML 被误加)
+        if not os.path.exists(os.path.join(sub, ".saved-article")):
+            continue
+        for f in os.listdir(sub):
+            if f.endswith(".html"):
+                html_path = os.path.join(sub, f)
+                entries.append((os.path.getmtime(html_path), name, f, html_path))
+                break
+    # 按 mtime 倒序:最新的在前
+    entries.sort(reverse=True)
+
+    for mtime, folder_name, fname, html_path in entries:
+        try:
+            with open(html_path, encoding="utf-8") as fh:
+                html = fh.read()
+        except Exception:
+            continue
+        title_m = re.search(r'<h1[^>]*>(.*?)</h1>', html, re.DOTALL)
+        title = re.sub(r'<[^>]+>', '', title_m.group(1)).strip() if title_m else folder_name
+        author_m = re.search(r'<span class="author">(.*?)</span>', html)
+        author = author_m.group(1).strip() if author_m else ""
+        date_m = re.search(r'<span class="date">(.*?)</span>', html)
+        date = date_m.group(1).strip() if date_m else ""
+
+        rel_href = urllib.parse.quote(f"{folder_name}/{fname}")
+        # 转义元数据,防止索引页 XSS
+        title_esc = _h.escape(title)
+        meta_line = _h.escape(" · ".join(x for x in (author, date) if x))
+        cards.append(f'''
+<a class="card" href="{rel_href}">
+  <div class="card-title">{title_esc}</div>
+  <div class="card-meta">{meta_line}</div>
+</a>''')
+
+    body = "".join(cards) if cards else '<p class="empty">还没有保存过文章</p>'
+    return f'''<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>我的文章目录</title>
+<style>
+body {{ font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif;
+       max-width: 800px; margin: 40px auto; padding: 20px;
+       background: #fff; color: #333; }}
+h1 {{ font-size: 22px; margin-bottom: 24px; }}
+.card {{ display: block; padding: 14px 16px; margin: 10px 0;
+        background: #fafafa; border-radius: 8px; border: 1px solid #eee;
+        text-decoration: none; color: inherit; transition: background 0.15s; }}
+.card:hover {{ background: #f0f0f0; }}
+.card-title {{ font-size: 15px; font-weight: 500; color: #1a1a1a; margin-bottom: 4px; }}
+.card-meta {{ font-size: 12px; color: #888; }}
+.empty {{ color: #999; text-align: center; padding: 40px; }}
+@media (prefers-color-scheme: dark) {{
+  body {{ background: #1a1a1a; color: #d4d4d4; }}
+  h1 {{ color: #f0f0f0; }}
+  .card {{ background: #222; border-color: #333; }}
+  .card:hover {{ background: #2a2a2a; }}
+  .card-title {{ color: #f0f0f0; }}
+  .card-meta {{ color: #888; }}
+}}
+</style>
+</head>
+<body>
+<h1>我的文章目录 <small style="color:#999;font-size:14px;font-weight:normal;">共 {len(entries)} 篇</small></h1>
+{body}
+</body>
+</html>'''
+
+
+def open_file(path: str) -> bool:
+    """跨平台在系统默认程序里打开文件。成功返回 True,失败静默返回 False。"""
+    try:
+        system = platform.system()
+        if system == "Darwin":
+            subprocess.run(["open", path], check=False)
+        elif system == "Windows":
+            os.startfile(path)  # type: ignore[attr-defined]
+        else:
+            subprocess.run(["xdg-open", path], check=False)
+        return True
+    except Exception:
+        return False
+
+
 def _is_http_url(s: str) -> bool:
     return s.startswith(("http://", "https://"))
 
@@ -919,16 +1044,41 @@ def generate_html(data: dict, img_files: list[str | None], img_dir: str, embed_i
         r'UTAG(\d+)',
         lambda m: inline_html[int(m.group(1))], html_body)
 
-    site_badge = f'<span class="badge">{site}</span>' if site else ""
-    author_line = f'<span class="author">{author}</span>' if author else ""
-    date_line = f'<span class="date">{data.get("date", "")}</span>' if data.get("date") else ""
+    # 给标题加锚点 id 并构造侧边 TOC
+    _anchor_counter = [0]
+
+    def _add_anchor(m):
+        _anchor_counter[0] += 1
+        return f'<h{m.group(1)} id="toc-{_anchor_counter[0]}">{m.group(2)}</h{m.group(1)}>'
+
+    html_body = re.sub(r'<h([1-4])>(.*?)</h\1>', _add_anchor, html_body, flags=re.DOTALL)
+    tocs = build_toc(html_body)
+    if tocs:
+        toc_items = []
+        for i, h in enumerate(tocs, 1):
+            toc_items.append(
+                f'<a href="#toc-{i}" class="toc-l{h["level"]}">{h["text"]}</a>')
+        toc_panel = ('<nav class="toc-panel"><div class="toc-title">目录</div>'
+                     + "".join(toc_items) + '</nav>')
+    else:
+        toc_panel = ""
+
+    # HTML 转义元数据,防止 title/author/date/site 里的 < > & 破坏页面或 XSS
+    _e = _html_lib.escape
+    _title_html = _e(title)
+    _author_html = _e(author)
+    _date_html = _e(data.get("date", ""))
+    _site_html = _e(site)
+    site_badge = f'<span class="badge">{_site_html}</span>' if site else ""
+    author_line = f'<span class="author">{_author_html}</span>' if author else ""
+    date_line = f'<span class="date">{_date_html}</span>' if data.get("date") else ""
 
     return f'''<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>{title}</title>
+<title>{_title_html}</title>
 <style>
 body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
        max-width: 800px; margin: 40px auto; padding: 20px; background: #fff; color: #333; line-height: 1.8; }}
@@ -961,17 +1111,53 @@ h4 {{ font-size: 15px; margin: 16px 0 8px; color: #555; }}
 .content img {{ max-width: 100%; border-radius: 8px; margin: 12px 0; cursor: pointer; transition: transform 0.15s; }}
 .content img:hover {{ transform: scale(1.02); }}
 .footer {{ color: #bbb; font-size: 12px; margin-top: 32px; padding-top: 16px; border-top: 1px solid #f0f0f0; text-align: center; }}
+.toc-panel {{ position: fixed; top: 40px; right: 24px; width: 200px; max-height: 80vh;
+              overflow-y: auto; font-size: 13px; color: #666; background: #fafafa;
+              padding: 12px 14px; border-radius: 8px; border: 1px solid #eee; }}
+.toc-panel .toc-title {{ font-weight: 600; margin-bottom: 8px; color: #333; }}
+.toc-panel a {{ display: block; text-decoration: none; color: #666; padding: 3px 0;
+                line-height: 1.4; border-radius: 3px; }}
+.toc-panel a:hover {{ color: #1a1a1a; background: #f0f0f0; padding-left: 4px; }}
+.toc-panel .toc-l1 {{ padding-left: 0; font-weight: 500; }}
+.toc-panel .toc-l2 {{ padding-left: 12px; }}
+.toc-panel .toc-l3 {{ padding-left: 24px; font-size: 12px; }}
+.toc-panel .toc-l4 {{ padding-left: 36px; font-size: 12px; color: #999; }}
+@media (max-width: 1100px) {{ .toc-panel {{ display: none; }} }}
+@media (prefers-color-scheme: dark) {{
+  body {{ background: #1a1a1a; color: #d4d4d4; }}
+  h1, .content strong {{ color: #f0f0f0; }}
+  h2, h3, h4 {{ color: #ccc; }}
+  .content code {{ background: #2d2d2d; color: #e4a4a4; }}
+  .content pre {{ background: #0d1117; }}
+  .content pre code {{ color: #d4d4d4; }}
+  .content blockquote {{ border-color: #444; background: #222; color: #aaa; }}
+  .content table {{ }}
+  .content th {{ background: #2a2a2a; color: #eee; }}
+  .content th, .content td {{ border-color: #333; }}
+  .content tbody tr:nth-child(even) {{ background: #222; }}
+  .content del {{ color: #666; }}
+  .meta {{ color: #999; border-color: #333; }}
+  .author {{ color: #ccc; }}
+  .badge {{ background: #2a2a2a; color: #ccc; }}
+  .footer {{ color: #555; border-color: #333; }}
+  .toc-panel {{ background: #202020; border-color: #333; color: #aaa; }}
+  .toc-panel .toc-title {{ color: #ddd; }}
+  .toc-panel a {{ color: #999; }}
+  .toc-panel a:hover {{ color: #f0f0f0; background: #2a2a2a; }}
+  .content a {{ color: #7db8ff; }}
+}}
 </style>
 </head>
 <body>
-<h1>{title}</h1>
+{toc_panel}
+<h1>{_title_html}</h1>
 <div class="meta">
   {site_badge} {author_line} {date_line}
 </div>
 <div class="content">
 {html_body}
 </div>
-<div class="footer">保存自{site or "网页"} · {author}</div>
+<div class="footer">保存自{_site_html or "网页"} · {_author_html}</div>
 </body>
 </html>'''
 
@@ -1020,7 +1206,8 @@ def generate_markdown(data: dict, img_files: list[str | None], img_dir_name: str
 # ==================== 主流程 ====================
 
 def save_article(url: str, output_dir: str, formats: list[str] | None = None,
-                 use_subfolder: bool = True, log_fn=None) -> dict:
+                 use_subfolder: bool = True, log_fn=None,
+                 date_prefix: bool = False) -> dict:
     """保存文章，返回结果信息。
 
     Args:
@@ -1067,11 +1254,23 @@ def save_article(url: str, output_dir: str, formats: list[str] | None = None,
 
     # 确定输出目录
     safe_title = safe_filename(title) or "article"
+    if date_prefix and use_subfolder:
+        d = data.get("date") or datetime.date.today().strftime("%Y-%m-%d")
+        folder_name = f"{d}_{safe_title}"
+    else:
+        folder_name = safe_title
     if use_subfolder:
-        article_dir = os.path.join(output_dir, safe_title)
+        article_dir = os.path.join(output_dir, folder_name)
     else:
         article_dir = output_dir
     os.makedirs(article_dir, exist_ok=True)
+
+    # 标记文件:build_index_html 靠它区分本工具保存的文章 vs 其他 HTML 目录
+    if use_subfolder:
+        try:
+            open(os.path.join(article_dir, ".saved-article"), "w").close()
+        except Exception:
+            pass
 
     img_dir = os.path.join(article_dir, "images")
 
@@ -1094,7 +1293,7 @@ def save_article(url: str, output_dir: str, formats: list[str] | None = None,
     if "html" in formats:
         embed = not keep_images  # 不保留图片文件夹时，图片嵌入 HTML
         html_content = generate_html(data, img_files, img_dir, embed_images=embed)
-        html_path = os.path.join(article_dir, f"{safe_title}.html")
+        html_path = os.path.join(article_dir, f"{folder_name}.html")
         with open(html_path, "w", encoding="utf-8") as f:
             f.write(html_content)
         output_files.append(html_path)
@@ -1104,7 +1303,7 @@ def save_article(url: str, output_dir: str, formats: list[str] | None = None,
     if "md" in formats:
         md_img_dir = "images" if keep_images else ""
         md_content = generate_markdown(data, img_files, md_img_dir)
-        md_path = os.path.join(article_dir, f"{safe_title}.md")
+        md_path = os.path.join(article_dir, f"{folder_name}.md")
         with open(md_path, "w", encoding="utf-8") as f:
             f.write(md_content)
         output_files.append(md_path)
@@ -1119,6 +1318,8 @@ def save_article(url: str, output_dir: str, formats: list[str] | None = None,
     return {
         "files": output_files,
         "title": title,
+        "author": data.get("author", ""),
+        "date": data.get("date", ""),
         "site": data.get("site", ""),
         "images": [f for f in img_files if f] if keep_images else [],
     }
@@ -1206,6 +1407,7 @@ def main():
     parser.add_argument("--no-md", action="store_true", help="不保存 Markdown")
     parser.add_argument("--no-images", action="store_true", help="不下载图片")
     parser.add_argument("--flat", action="store_true", help="不创建子文件夹，直接存到输出目录")
+    parser.add_argument("--date-prefix", action="store_true", help="文件夹名前加日期前缀 YYYY-MM-DD_")
     parser.add_argument("--launch-chrome", action="store_true", help="启动调试 Chrome")
     args = parser.parse_args()
 
@@ -1240,6 +1442,7 @@ def main():
         formats=formats,
         use_subfolder=not args.flat,
         log_fn=log,
+        date_prefix=args.date_prefix,
     )
 
     if result.get("error"):

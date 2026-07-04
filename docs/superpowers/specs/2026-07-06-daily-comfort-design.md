@@ -52,7 +52,7 @@
 - generate_html 后处理:扫描 `<h1>~<h4>` 收集为 TOC
 - 生成 `<div class="toc-panel">` 固定在右侧
 - 给每个 heading 加 `id="toc-N"`(N 递增),TOC 里的链接指向它
-- 桌面(> 900px):固定右侧,宽 200px,`position: fixed`
+- 桌面(> 1100px):固定右侧,宽 200px,`position: fixed`(实测:800 正文 + 200 TOC + 边距 ≈ 1080px 才不重叠)
 - 窄屏:隐藏(YAGNI,不做移动折叠)
 - 深色模式下同步换色
 
@@ -81,3 +81,11 @@
 ## 明确不做(YAGNI)
 
 - 窄屏侧栏折叠动画;目录索引搜索/筛选;打开时的窗口位置控制;跨机器同步偏好;Linux 平台自动打开的桌面环境兼容测试。
+
+## 评审后修正(2026-07-06 code review)
+
+- **HTML 转义**:title/author/date/site 在 generate_html 里全线 `html.escape` 处理(<title>、<h1>、meta 区、footer 均已修);build_index_html 卡片里 title/author/date 同样转义。防 XSS 与 HTML 破损。
+- **目录索引只扫标记目录**:save_article 成功后写 `.saved-article` 空文件,build_index_html 只识别有该标记的子目录。避免默认 save_dir=桌面时把桌面上其他 HTML 目录误加入目录索引。
+- **批量复制保留所有成功**:`session_successes` 用列表存储;复制按钮把所有成功文章的分享文本用空行分隔一次性拷贝。
+- **CLI 补 `--date-prefix` 标志**:与 GUI 保持功能对等。
+- **TOC 断点 900 → 1100**:按实测布局纠正(见 §5)。

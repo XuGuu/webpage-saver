@@ -6,7 +6,9 @@
 
 import unittest
 
-from save_webpage import parse_wechat_html, generate_html, pick_url_from_clipboard, split_urls
+from save_webpage import (parse_wechat_html, generate_html, pick_url_from_clipboard,
+                          split_urls, format_share_text, build_toc, build_index_html,
+                          open_file)
 
 
 def make_page(content_html: str, title: str = "测试文章") -> str:
@@ -238,7 +240,9 @@ class TestGenerateHtmlStructures(unittest.TestCase):
         return generate_html(data, [], "")
 
     def test_h4_converted(self):
-        self.assertIn("<h4>四级标题</h4>", self._html_for("#### 四级标题"))
+        html = self._html_for("#### 四级标题")
+        # 允许 heading 带 id 属性(TOC 锚点)
+        self.assertRegex(html, r'<h4[^>]*>四级标题</h4>')
 
     def test_unordered_list_converted(self):
         html = self._html_for("- 甲\n- 乙")
@@ -259,9 +263,9 @@ class TestGenerateHtmlStructures(unittest.TestCase):
     def test_block_elements_not_wrapped_in_p(self):
         """块级元素不能包在 <p> 里(评审确认项 #3)。"""
         html = self._html_for("## 标题\n\n正文段落\n\n- 甲\n- 乙")
-        self.assertNotIn("<p><h2>", html)
+        self.assertNotIn("<p><h2", html)
         self.assertNotIn("<p><ul>", html)
-        self.assertIn("<h2>标题</h2>", html)
+        self.assertRegex(html, r'<h2[^>]*>标题</h2>')
         self.assertIn("<p>正文段落</p>", html)
 
     def test_no_stray_br_after_trailing_list(self):
@@ -688,6 +692,267 @@ class TestReviewFixes(unittest.TestCase):
             warnings.simplefilter("error", DeprecationWarning)
             data = parse_wechat_html(html)  # 不应抛出
         self.assertRegex(data.get("date", ""), r"^2026-06-2[456]$")
+
+
+class TestShareText(unittest.TestCase):
+    """复制到剪贴板的文本格式(日常小舒适 #3)。"""
+
+    def test_full_share_text(self):
+        text = format_share_text({
+            "title": "标题",
+            "author": "作者名",
+            "date": "2026-06-26",
+        }, url="https://example.com/x")
+        self.assertIn("标题", text)
+        self.assertIn("作者名 · 2026-06-26", text)
+        self.assertIn("https://example.com/x", text)
+
+    def test_share_text_without_date(self):
+        text = format_share_text({"title": "标题", "author": "作者"}, url="https://x.com")
+        self.assertIn("标题", text)
+        self.assertIn("作者", text)
+        self.assertIn("https://x.com", text)
+        # 没日期就不要留孤零零的 " · " 或空行
+        self.assertNotIn("· ", text.replace(" · ", ""))
+
+    def test_share_text_without_author(self):
+        text = format_share_text({"title": "标题", "date": "2026-01-01"},
+                                 url="https://x.com")
+        self.assertIn("标题", text)
+        self.assertIn("2026-01-01", text)
+
+    def test_share_text_title_only(self):
+        text = format_share_text({"title": "只有标题"}, url="https://x.com")
+        self.assertIn("只有标题", text)
+        self.assertIn("https://x.com", text)
+
+
+class TestDatePrefixDir(unittest.TestCase):
+    """文件夹名加日期前缀(日常小舒适 #2)。"""
+
+    def test_date_prefix_prepends_date(self):
+        """使用文章 date 时,目录名为 YYYY-MM-DD_标题。"""
+        import tempfile
+        from unittest.mock import patch
+        from save_webpage import save_article
+
+        with tempfile.TemporaryDirectory() as tmp:
+            fake = {"title": "我的文章", "author": "A", "date": "2026-06-26",
+                    "markdown": "正文", "images": [], "site": "公众号"}
+            with patch("save_webpage.extract_wechat", return_value=fake), \
+                 patch("save_webpage.detect_site", return_value="wechat"):
+                result = save_article(
+                    "https://mp.weixin.qq.com/s/x", tmp,
+                    formats=["md"], use_subfolder=True, date_prefix=True)
+            self.assertFalse(result.get("error"))
+            files = result["files"]
+            self.assertTrue(any("2026-06-26_我的文章" in f for f in files),
+                            f"实际:{files}")
+
+    def test_no_date_falls_back_to_today(self):
+        """文章没 date 时用当天日期。"""
+        import tempfile, re, datetime
+        from unittest.mock import patch
+        from save_webpage import save_article
+
+        with tempfile.TemporaryDirectory() as tmp:
+            fake = {"title": "无日期文章", "author": "A", "date": "",
+                    "markdown": "正文", "images": [], "site": ""}
+            with patch("save_webpage.extract_generic", return_value=fake), \
+                 patch("save_webpage.detect_site", return_value="generic"):
+                result = save_article(
+                    "https://x.com/a", tmp,
+                    formats=["md"], use_subfolder=True, date_prefix=True)
+            today = datetime.date.today().strftime("%Y-%m-%d")
+            self.assertTrue(any(f"{today}_无日期文章" in f for f in result["files"]))
+
+
+class TestToc(unittest.TestCase):
+    """HTML 侧边浮动导航(日常小舒适 #5)。"""
+
+    def test_build_toc_extracts_headings(self):
+        headings = build_toc("<h1>标题一</h1><p>正文</p><h2>子标题</h2><h3>更深</h3>")
+        self.assertEqual(len(headings), 3)
+        self.assertEqual(headings[0]["text"], "标题一")
+        self.assertEqual(headings[0]["level"], 1)
+        self.assertEqual(headings[1]["text"], "子标题")
+        self.assertEqual(headings[1]["level"], 2)
+
+    def test_html_output_contains_toc_panel(self):
+        """生成的 HTML 里有 toc 面板。"""
+        data = {"title": "T", "author": "", "site": "", "images": [],
+                "markdown": "## 章一\n\n正文\n\n## 章二\n\n正文"}
+        html = generate_html(data, [], "")
+        self.assertIn('class="toc-panel"', html)
+        self.assertIn("章一", html)
+        self.assertIn("章二", html)
+
+    def test_headings_get_anchor_ids(self):
+        """每个 heading 有可跳转的 id。"""
+        data = {"title": "T", "author": "", "site": "", "images": [],
+                "markdown": "## 章一\n\n正文"}
+        html = generate_html(data, [], "")
+        # 有 id 就能锚点跳转
+        import re
+        self.assertRegex(html, r'<h2\s+id="[^"]+">章一</h2>')
+
+
+class TestDarkMode(unittest.TestCase):
+    """HTML 深色模式跟随系统(日常小舒适 #4)。"""
+
+    def test_dark_mode_media_query_present(self):
+        data = {"title": "T", "author": "", "site": "", "images": [], "markdown": "正文"}
+        html = generate_html(data, [], "")
+        self.assertIn("prefers-color-scheme: dark", html)
+
+
+class TestIndex(unittest.TestCase):
+    """保存目录里生成目录索引(日常小舒适 #6)。"""
+
+    def test_build_index_scans_articles(self):
+        """扫描根目录下所有子文件夹里的 HTML,提取标题/作者/日期。"""
+        import tempfile, os
+        with tempfile.TemporaryDirectory() as root:
+            # 造两篇文章
+            for i, (title, author, date) in enumerate([
+                ("文章甲", "A", "2026-06-26"),
+                ("文章乙", "B", "2026-06-27"),
+            ]):
+                sub = os.path.join(root, title)
+                os.makedirs(sub)
+                fake_html = f'''<!DOCTYPE html><html><head><title>{title}</title></head>
+<body>
+<h1>{title}</h1>
+<div class="meta"><span class="author">{author}</span> <span class="date">{date}</span></div>
+</body></html>'''
+                with open(os.path.join(sub, f"{title}.html"), "w", encoding="utf-8") as f:
+                    f.write(fake_html)
+                open(os.path.join(sub, ".saved-article"), "w").close()
+
+            index_html = build_index_html(root)
+            self.assertIn("文章甲", index_html)
+            self.assertIn("文章乙", index_html)
+            self.assertIn("A", index_html)
+            self.assertIn("2026-06-27", index_html)
+
+
+class TestOpenFile(unittest.TestCase):
+    """跨平台打开文件(日常小舒适 #1)。"""
+
+    def test_open_file_calls_platform_opener(self):
+        """macOS 上应调用 open 命令。"""
+        from unittest.mock import patch
+        import platform
+        if platform.system() != "Darwin":
+            self.skipTest("仅在 macOS 测试 open 调用")
+        with patch("save_webpage.subprocess.run") as mock_run:
+            open_file("/tmp/x.html")
+            self.assertTrue(mock_run.called)
+            call_args = mock_run.call_args[0][0]
+            self.assertIn("open", call_args[0])
+            self.assertIn("/tmp/x.html", call_args)
+
+
+class TestReview2Fixes(unittest.TestCase):
+    """本轮 code-review 确认项集中回归测试。"""
+
+    def test_title_html_escaped(self):
+        """title 里的 <script> 不能穿透到生成 HTML(评审 A/D/E)。"""
+        data = {"title": "<script>alert(1)</script>", "author": "作者",
+                "date": "", "site": "", "images": [], "markdown": "正文"}
+        html = generate_html(data, [], "")
+        self.assertNotIn("<script>alert(1)</script>", html)
+        self.assertIn("&lt;script&gt;", html)
+
+    def test_author_html_escaped(self):
+        data = {"title": "T", "author": "<img src=x onerror=alert(1)>",
+                "date": "", "site": "", "images": [], "markdown": "正文"}
+        html = generate_html(data, [], "")
+        self.assertNotIn("<img src=x onerror=", html)
+
+    def test_index_html_escapes_metadata(self):
+        """目录索引卡片里 title/author 也要转义。"""
+        import tempfile, os
+        with tempfile.TemporaryDirectory() as root:
+            sub = os.path.join(root, "文章甲")
+            os.makedirs(sub)
+            # 造一篇已含被转义的 title(generate_html 出来的)
+            with open(os.path.join(sub, "文章甲.html"), "w", encoding="utf-8") as f:
+                f.write('<!DOCTYPE html><html><head><title>&lt;script&gt;A&lt;/script&gt;</title></head>'
+                        '<body><h1>&lt;script&gt;A&lt;/script&gt;</h1>'
+                        '<div class="meta"><span class="author">&lt;img&gt;</span>'
+                        '<span class="date">2026-01-01</span></div></body></html>')
+            # 造一个 saved-article 标记,让它被扫到
+            open(os.path.join(sub, ".saved-article"), "w").close()
+            idx = build_index_html(root)
+        # 索引里应保留转义形式,不能出现原始 <script>
+        self.assertNotIn("<script>A</script>", idx)
+
+    def test_index_only_includes_marked_dirs(self):
+        """build_index_html 只扫描含 .saved-article 标记的子目录,避免桌面污染。"""
+        import tempfile, os
+        with tempfile.TemporaryDirectory() as root:
+            # 造 3 个目录:2 个是真文章(有标记),1 个是桌面上其他 html(无标记)
+            for name in ("真文章A", "真文章B"):
+                sub = os.path.join(root, name)
+                os.makedirs(sub)
+                open(os.path.join(sub, ".saved-article"), "w").close()
+                with open(os.path.join(sub, f"{name}.html"), "w", encoding="utf-8") as f:
+                    f.write(f'<html><head><title>{name}</title></head><body>'
+                            f'<h1>{name}</h1></body></html>')
+            noise = os.path.join(root, "iCloud备份")
+            os.makedirs(noise)
+            with open(os.path.join(noise, "sync.html"), "w", encoding="utf-8") as f:
+                f.write("<html><body>不是保存的文章</body></html>")
+
+            idx = build_index_html(root)
+            self.assertIn("真文章A", idx)
+            self.assertIn("真文章B", idx)
+            self.assertNotIn("不是保存的文章", idx)
+
+    def test_save_article_writes_marker(self):
+        """save_article 成功时应在文章目录里写 .saved-article 标记。"""
+        import tempfile, os
+        from unittest.mock import patch
+        from save_webpage import save_article
+        with tempfile.TemporaryDirectory() as tmp:
+            fake = {"title": "标记测试", "author": "A", "date": "2026-01-01",
+                    "markdown": "正文", "images": [], "site": ""}
+            with patch("save_webpage.extract_generic", return_value=fake), \
+                 patch("save_webpage.detect_site", return_value="generic"):
+                save_article("https://x.com/a", tmp,
+                             formats=["md"], use_subfolder=True)
+            marker = os.path.join(tmp, "标记测试", ".saved-article")
+            self.assertTrue(os.path.exists(marker))
+
+    def test_cli_supports_date_prefix_flag(self):
+        """CLI 应支持 --date-prefix。"""
+        import subprocess
+        result = subprocess.run(
+            ["python3", "save_webpage.py", "--help"],
+            cwd="/Users/xugu/项目代码/webpage-saver",
+            capture_output=True, text=True, timeout=15)
+        self.assertIn("--date-prefix", result.stdout)
+
+
+class TestBatchShareTracking(unittest.TestCase):
+    """批量复制应保留所有成功的分享文本(纯逻辑测试,不动 GUI)。"""
+
+    def test_batch_shares_joined_by_blank_line(self):
+        """给一个成功列表,拼出的分享文本应用空行分隔。"""
+        successes = [
+            ("https://a.com", {"title": "甲", "author": "作者A", "date": "2026-01-01"}),
+            ("https://b.com", {"title": "乙", "author": "作者B", "date": "2026-01-02"}),
+        ]
+        # 逻辑:每篇 format_share_text 后用 \n\n 分隔
+        text = "\n\n".join(
+            format_share_text(r, url=u) for u, r in successes)
+        self.assertIn("甲", text)
+        self.assertIn("乙", text)
+        self.assertIn("https://a.com", text)
+        self.assertIn("https://b.com", text)
+        # 甲的最后一行(url)后应有空行然后是乙
+        self.assertRegex(text, r"https://a\.com\n\n乙")
 
 
 if __name__ == "__main__":
