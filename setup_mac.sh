@@ -29,5 +29,8 @@ fi
 echo "Installing dependencies..."
 $PY -m pip install -r requirements.txt --quiet --disable-pip-version-check
 
+# 让「启动.command」可以双击运行
+[ -f "启动.command" ] && chmod +x "启动.command"
+
 echo "Starting..."
 $PY gui.py

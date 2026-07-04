@@ -6,7 +6,7 @@
 
 import unittest
 
-from save_webpage import parse_wechat_html, generate_html
+from save_webpage import parse_wechat_html, generate_html, pick_url_from_clipboard, split_urls
 
 
 def make_page(content_html: str, title: str = "测试文章") -> str:
@@ -268,6 +268,160 @@ class TestGenerateHtmlStructures(unittest.TestCase):
         """文末列表后不能残留多余 <br>(评审确认项 #3)。"""
         html = self._html_for("正文\n\n- 甲\n- 乙")
         self.assertNotIn("</ul><br>", html)
+
+
+class TestWechatLinks(unittest.TestCase):
+    """公众号超链接保留(UX 增强 #1)。"""
+
+    def test_link_preserved(self):
+        data = parse_wechat_html(make_page(
+            '<p>前文<a href="https://example.com/x">锚文字</a>后文</p>'))
+        self.assertIn("[锚文字](https://example.com/x)", data["markdown"])
+
+    def test_link_inside_paragraph_has_spacing(self):
+        data = parse_wechat_html(make_page(
+            '<p>see <a href="https://a.com">docs</a> for details</p>'))
+        self.assertIn("see [docs](https://a.com) for details", data["markdown"])
+
+    def test_anchor_link_ignored(self):
+        """页内锚点(#xxx)不当作外链保留,直接输出文字。"""
+        data = parse_wechat_html(make_page('<p><a href="#top">回顶部</a></p>'))
+        md = data["markdown"]
+        self.assertIn("回顶部", md)
+        self.assertNotIn("](#top)", md)
+
+    def test_javascript_link_ignored(self):
+        data = parse_wechat_html(make_page(
+            '<p><a href="javascript:void(0)">按钮</a></p>'))
+        self.assertNotIn("javascript:", data["markdown"])
+
+
+class TestWechatCode(unittest.TestCase):
+    """公众号代码块保留(UX 增强 #2)。"""
+
+    def test_pre_block_wrapped_in_fences(self):
+        data = parse_wechat_html(make_page(
+            "<pre><code>npm install foo\nnpm run build</code></pre>"))
+        md = data["markdown"]
+        self.assertIn("```", md)
+        self.assertIn("npm install foo", md)
+        self.assertIn("npm run build", md)
+
+    def test_inline_code_wrapped_in_backticks(self):
+        data = parse_wechat_html(make_page(
+            "<p>运行 <code>python gui.py</code> 启动</p>"))
+        self.assertIn("`python gui.py`", data["markdown"])
+
+    def test_pre_block_html_renders(self):
+        data = {"title": "T", "author": "", "site": "", "images": [],
+                "markdown": "```\nhello world\n```"}
+        html = generate_html(data, [], "")
+        self.assertIn("<pre", html)
+        self.assertIn("hello world", html)
+
+
+class TestClipboardPick(unittest.TestCase):
+    """剪贴板 URL 识别(UX 增强 #4)。纯函数,不真的读剪贴板。"""
+
+    def test_http_url_picked(self):
+        self.assertEqual(pick_url_from_clipboard("https://example.com/a"),
+                         "https://example.com/a")
+
+    def test_url_with_whitespace_trimmed(self):
+        self.assertEqual(pick_url_from_clipboard("  https://example.com  "),
+                         "https://example.com")
+
+    def test_non_url_ignored(self):
+        self.assertEqual(pick_url_from_clipboard("hello world"), "")
+
+    def test_empty_ignored(self):
+        self.assertEqual(pick_url_from_clipboard(""), "")
+
+
+class TestSplitUrls(unittest.TestCase):
+    """批量 URL 切分(UX 增强 #5)。"""
+
+    def test_single_url(self):
+        self.assertEqual(split_urls("https://a.com"), ["https://a.com"])
+
+    def test_multiple_urls_by_newline(self):
+        self.assertEqual(
+            split_urls("https://a.com\nhttps://b.com\nhttps://c.com"),
+            ["https://a.com", "https://b.com", "https://c.com"])
+
+    def test_blank_lines_ignored(self):
+        self.assertEqual(
+            split_urls("\n\nhttps://a.com\n\n\nhttps://b.com\n"),
+            ["https://a.com", "https://b.com"])
+
+    def test_non_url_lines_ignored(self):
+        """夹杂的备注文字不当 URL。"""
+        self.assertEqual(
+            split_urls("我的收藏\nhttps://a.com\nhttps://b.com\n请保存"),
+            ["https://a.com", "https://b.com"])
+
+    def test_space_separated_urls_on_one_line(self):
+        """同一行用空格分隔的多个 URL 都拆出来(评审确认项)。"""
+        self.assertEqual(
+            split_urls("https://a.com https://b.com"),
+            ["https://a.com", "https://b.com"])
+
+
+class TestSecurityEscaping(unittest.TestCase):
+    """HTML 转义与 XSS 防护(评审确认项)。"""
+
+    def _html_for(self, md: str) -> str:
+        data = {"title": "T", "author": "", "markdown": md, "site": "", "images": []}
+        return generate_html(data, [], "")
+
+    def test_script_tag_escaped(self):
+        """markdown 里的 <script> 输出时必须被转义。"""
+        html = self._html_for("讨论 <script>alert(1)</script> 用法")
+        self.assertNotIn("<script>", html)
+        self.assertIn("&lt;script&gt;", html)
+
+    def test_javascript_uppercase_href_blocked(self):
+        """大写 JavaScript: 也要被过滤,防止 XSS。"""
+        from save_webpage import parse_wechat_html
+        data = parse_wechat_html(make_page(
+            '<p><a href="JavaScript:alert(1)">按钮</a></p>'))
+        self.assertNotIn("JavaScript:", data["markdown"])
+        self.assertNotIn("javascript:", data["markdown"].lower())
+
+    def test_data_uri_href_blocked(self):
+        from save_webpage import parse_wechat_html
+        data = parse_wechat_html(make_page(
+            '<p><a href="data:text/html,<script>alert(1)</script>">点</a></p>'))
+        self.assertNotIn("data:", data["markdown"])
+
+
+class TestPreInStructure(unittest.TestCase):
+    """pre 嵌套在结构容器里也要保留围栏(评审确认项)。"""
+
+    def test_pre_nested_in_section_keeps_fence(self):
+        from save_webpage import parse_wechat_html
+        data = parse_wechat_html(make_page(
+            "<section><pre>npm install foo</pre></section>"))
+        self.assertIn("```", data["markdown"])
+        self.assertIn("npm install foo", data["markdown"])
+
+
+class TestInlineCodeWithBacktick(unittest.TestCase):
+    """行内 code 内含反引号也不能破坏格式(评审确认项)。"""
+
+    def test_backtick_in_code(self):
+        from save_webpage import parse_wechat_html
+        data = parse_wechat_html(make_page(
+            "<p>命令 <code>echo `date`</code> 用来</p>"))
+        # 用双反引号包住含反引号的行内代码
+        md = data["markdown"]
+        self.assertIn("echo `date`", md)
+        # HTML 转换后不应该有裂开的空 <code>
+        html = generate_html(
+            {"title": "T", "author": "", "markdown": md, "site": "", "images": []},
+            [], "")
+        # 不能出现空的 <code></code>
+        self.assertNotIn("<code></code>", html)
 
 
 if __name__ == "__main__":

@@ -50,6 +50,30 @@ def human_size(n: int) -> str:
     return f"{n / (1024 * 1024):.1f} MB"
 
 
+def _is_http_url(s: str) -> bool:
+    return s.startswith(("http://", "https://"))
+
+
+def pick_url_from_clipboard(text: str) -> str:
+    """剪贴板内容里挑出 URL，不是 URL 就返回空串。GUI 启动时自动填用。"""
+    if not text:
+        return ""
+    stripped = text.strip()
+    if _is_http_url(stripped) and not any(c in stripped for c in " \t\n"):
+        return stripped
+    return ""
+
+
+def split_urls(text: str) -> list[str]:
+    """把多行输入切成 URL 列表，每行还可按空白拆多个 URL，非 URL 忽略。"""
+    urls = []
+    for line in text.splitlines():
+        for token in line.split():
+            if _is_http_url(token):
+                urls.append(token)
+    return urls
+
+
 def detect_site(url: str) -> str:
     """识别网站类型，返回: wechat / xhs / zhihu / csdn / generic"""
     host = urllib.parse.urlparse(url).netloc.lower()
@@ -106,7 +130,7 @@ def download_images(urls: list[str], save_dir: str, referer: str = "") -> list[s
 # ==================== 提取器：公众号 ====================
 
 _HEADING_TAGS = ("h1", "h2", "h3", "h4", "h5", "h6")
-_STRUCTURE_TAGS = _HEADING_TAGS + ("ul", "ol", "blockquote")
+_STRUCTURE_TAGS = _HEADING_TAGS + ("ul", "ol", "blockquote", "pre")
 
 
 def _inline_md(el) -> str:
@@ -132,6 +156,22 @@ def _inline_md(el) -> str:
                 parts.append(inner)  # 嵌套加粗（strong 套 b）不重复包
             else:
                 parts.append(f"**{inner}**")
+        elif child.name == "code":
+            inner = child.get_text().strip()
+            if inner:
+                # 含反引号时用双反引号避免 markdown 语法歧义
+                fence = "``" if "`" in inner else "`"
+                pad = " " if inner.startswith("`") or inner.endswith("`") else ""
+                parts.append(f"{fence}{pad}{inner}{pad}{fence}")
+        elif child.name == "a":
+            href = (child.get("href") or "").strip()
+            text = _inline_md(child).strip()
+            # 跳过页内锚点和危险 URL scheme（case-insensitive）
+            unsafe = ("#", "javascript:", "data:", "vbscript:")
+            if href and text and not href.lower().startswith(unsafe):
+                parts.append(f"[{text}]({href})")
+            elif text:
+                parts.append(text)
         else:
             parts.append(_inline_md(child))
     return "".join(parts)
@@ -156,6 +196,12 @@ def _collect_wechat_content(el, md_parts: list, img_urls: list):
                 md_parts.append(f"![图片{len(img_urls)}]({src})")
         elif child.name in ("script", "style"):
             continue
+        elif child.name == "pre":
+            # 代码块：三反引号围栏，原样保留缩进和换行
+            code = child.get_text()
+            code = code.strip("\n")
+            if code:
+                md_parts.append(f"```\n{code}\n```")
         elif child.name in _HEADING_TAGS and child.find("img") is None:
             # 标题：h1→#、h2→##……h4 以下封顶为 ####
             text = child.get_text(strip=True)
@@ -630,7 +676,23 @@ def generate_html(data: dict, img_files: list[str | None], img_dir: str, embed_i
                     md += f"![图片{i + 1}](images/{local_file})\n\n"
 
     # Markdown 转简单 HTML
+    import html as _html_lib
     html_body = md
+    # 代码块：先取出 ```...``` 块用占位符锁住，最后再放回，避免内容被后续规则污染
+    code_blocks: list[str] = []
+    _SENTINEL = "CODEBLOCK{}"  # 私用区码点，正文里绝对不会出现
+
+    def _stash_code(m):
+        code_blocks.append(m.group(1))
+        return _SENTINEL.format(len(code_blocks) - 1)
+
+    html_body = re.sub(r'```\n?(.*?)\n?```', _stash_code, html_body, flags=re.DOTALL)
+
+    # XSS 防护：转义 markdown 里的裸文本 HTML 元字符（<script> 之类不能直通到输出）
+    # 代码块已被占位符替换，转义不影响；后续 markdown 语法自己生成的 <h1><strong> 等标签
+    # 是硬编码字面串，此后不会再被转义
+    html_body = _html_lib.escape(html_body, quote=False)
+
     html_body = re.sub(r'^#### (.+)$', r'<h4>\1</h4>', html_body, flags=re.MULTILINE)
     html_body = re.sub(r'^### (.+)$', r'<h3>\1</h3>', html_body, flags=re.MULTILINE)
     html_body = re.sub(r'^## (.+)$', r'<h2>\1</h2>', html_body, flags=re.MULTILINE)
@@ -646,13 +708,15 @@ def generate_html(data: dict, img_files: list[str | None], img_dir: str, embed_i
         lambda m: "<ol>" + "".join(
             f"<li>{ln.split('. ', 1)[-1]}</li>" for ln in m.group(1).strip().splitlines()) + "</ol>\n",
         html_body, flags=re.MULTILINE)
-    # 引用块：连续的 "> " 行转为 <blockquote>
+    # 引用块：连续的 "> " 行转为 <blockquote>（此时 > 已被转义为 &gt;）
     html_body = re.sub(
-        r'((?:^> .+(?:\n|$))+)',
+        r'((?:^&gt; .+(?:\n|$))+)',
         lambda m: "<blockquote>" + "<br>".join(
-            ln[2:] for ln in m.group(1).strip().splitlines()) + "</blockquote>\n",
+            ln[5:] for ln in m.group(1).strip().splitlines()) + "</blockquote>\n",
         html_body, flags=re.MULTILINE)
     html_body = re.sub(r'\*\*(.+?)\*\*', r'<strong>\1</strong>', html_body)
+    # 行内代码：先双反引号（可含单反引号），再单反引号
+    html_body = re.sub(r'``\s?(.+?)\s?``', r'<code>\1</code>', html_body)
     html_body = re.sub(r'`([^`]+)`', r'<code>\1</code>', html_body)
     html_body = re.sub(r'!\[([^\]]*)\]\(([^\)]+)\)', r'<img src="\2" alt="\1" style="max-width:100%;border-radius:8px;margin:12px 0">', html_body)
     html_body = re.sub(r'\[([^\]]+)\]\(([^\)]+)\)', r'<a href="\2">\1</a>', html_body)
@@ -664,6 +728,17 @@ def generate_html(data: dict, img_files: list[str | None], img_dir: str, embed_i
     html_body = re.sub(
         r'<p>((?:<(?:h[1-4]|ul|ol|blockquote)[^>]*>.*?</(?:h[1-4]|ul|ol|blockquote)>)+)</p>',
         r'\1', html_body)
+
+    # 放回代码块（HTML 转义 & < >）
+    def _restore_code(m):
+        idx = int(m.group(1))
+        escaped = _html_lib.escape(code_blocks[idx])
+        return f"<pre><code>{escaped}</code></pre>"
+
+    html_body = re.sub(r'CODEBLOCK(\d+)', _restore_code, html_body)
+    # 代码块外面被段落包装的空 <p> 清理
+    html_body = re.sub(r'<p>(<pre><code>.*?</code></pre>)</p>', r'\1',
+                       html_body, flags=re.DOTALL)
 
     site_badge = f'<span class="badge">{site}</span>' if site else ""
     author_line = f'<span class="author">{author}</span>' if author else ""
@@ -681,6 +756,9 @@ h1 {{ font-size: 22px; margin-bottom: 8px; color: #1a1a1a; }}
 h2 {{ font-size: 18px; margin: 24px 0 12px; color: #333; }}
 h3 {{ font-size: 16px; margin: 20px 0 8px; color: #555; }}
 h4 {{ font-size: 15px; margin: 16px 0 8px; color: #555; }}
+.content pre {{ background: #f6f8fa; padding: 12px 14px; border-radius: 6px;
+                overflow-x: auto; font-size: 13px; line-height: 1.5; margin: 12px 0; }}
+.content pre code {{ background: transparent; padding: 0; }}
 .content ul, .content ol {{ margin: 12px 0; padding-left: 26px; }}
 .content li {{ margin: 6px 0; }}
 .content blockquote {{ border-left: 3px solid #ddd; margin: 12px 0; padding: 2px 16px;

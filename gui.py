@@ -9,7 +9,8 @@ import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from save_webpage import save_article, check_cdp, launch_chrome_debug, detect_site, human_size
+from save_webpage import (save_article, check_cdp, launch_chrome_debug,
+                          detect_site, human_size, pick_url_from_clipboard, split_urls)
 
 # 配置文件路径
 CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
@@ -34,7 +35,7 @@ class App:
     def __init__(self):
         self.root = tk.Tk()
         self.root.title("文章保存工具")
-        self.root.geometry("560x520")
+        self.root.geometry("560x560")
         self.root.resizable(False, False)
 
         # 加载配置
@@ -55,13 +56,21 @@ class App:
         pad = {"padx": 12, "pady": 4}
 
         # ---- URL ----
-        frm_url = ttk.LabelFrame(self.root, text="文章链接", padding=8)
+        frm_url = ttk.LabelFrame(self.root, text="文章链接（一行一个,支持批量）", padding=8)
         frm_url.pack(fill="x", **pad)
 
-        self.var_url = tk.StringVar()
-        ent = ttk.Entry(frm_url, textvariable=self.var_url)
-        ent.pack(fill="x")
-        ent.focus()
+        self.txt_url = tk.Text(frm_url, height=3, wrap="none", font=("", 10))
+        self.txt_url.pack(fill="x")
+        self.txt_url.focus()
+
+        # 自动从剪贴板取 URL
+        try:
+            clip = self.root.clipboard_get()
+        except tk.TclError:
+            clip = ""
+        auto_url = pick_url_from_clipboard(clip)
+        if auto_url:
+            self.txt_url.insert("1.0", auto_url)
 
         # ---- 保存位置 ----
         frm_dir = ttk.LabelFrame(self.root, text="保存到", padding=8)
@@ -149,9 +158,10 @@ class App:
             messagebox.showerror("错误", str(e))
 
     def _run(self):
-        url = self.var_url.get().strip()
-        if not url:
-            messagebox.showwarning("提示", "请输入文章链接")
+        raw = self.txt_url.get("1.0", "end").strip()
+        urls = split_urls(raw)
+        if not urls:
+            messagebox.showwarning("提示", "请输入至少一个 http(s) 开头的链接")
             return
 
         # 至少选一个格式
@@ -159,47 +169,57 @@ class App:
             messagebox.showwarning("提示", "请至少选择一个保存格式")
             return
 
-        # 知乎检查
-        if detect_site(url) == "zhihu" and not check_cdp():
-            messagebox.showwarning("提示", "知乎需要 Chrome\n请先点「启动 Chrome」并在 Chrome 中登录知乎")
+        # 知乎检查(任一链接是知乎就要 Chrome)
+        if any(detect_site(u) == "zhihu" for u in urls) and not check_cdp():
+            messagebox.showwarning("提示", "有知乎链接,需要 Chrome\n请先点「启动 Chrome」并在 Chrome 中登录知乎")
             return
 
         self._save_prefs()
         self.btn_run.config(state="disabled")
         self.progress.start(10)
-        self._log("--- 开始 ---")
+        self._log(f"--- 开始（共 {len(urls)} 篇）---")
 
-        threading.Thread(target=self._do_save, args=(url,), daemon=True).start()
+        threading.Thread(target=self._do_save, args=(urls,), daemon=True).start()
 
-    def _do_save(self, url: str):
+    def _do_save(self, urls: list):
         try:
             fmts = []
             if self.var_html.get(): fmts.append("html")
             if self.var_md.get(): fmts.append("md")
             if self.var_img.get(): fmts.append("images")
 
-            result = save_article(
-                url, self.var_dir.get(),
-                formats=fmts,
-                use_subfolder=self.var_subfolder.get(),
-                log_fn=self._log,
-            )
+            ok_count = 0
+            fail_count = 0
+            for i, url in enumerate(urls, 1):
+                if len(urls) > 1:
+                    self._log(f"[{i}/{len(urls)}] {url}")
+                try:
+                    result = save_article(
+                        url, self.var_dir.get(),
+                        formats=fmts,
+                        use_subfolder=self.var_subfolder.get(),
+                        log_fn=self._log,
+                    )
+                    if result.get("error"):
+                        self._log(f"  失败: {result['error']}")
+                        fail_count += 1
+                        continue
+                    for f in result.get("files", []):
+                        size = os.path.getsize(f)
+                        self._log(f"  {os.path.basename(f)}  ({human_size(size)})")
+                    if result.get("images"):
+                        self._log(f"  图片: {len(result['images'])} 张")
+                    ok_count += 1
+                except Exception as e:
+                    # 兜住 save_article 里没转成 {"error":...} 的异常,不影响后续 URL
+                    self._log(f"  失败: {e}")
+                    fail_count += 1
 
-            if result.get("error"):
-                self._log(f"")
-                self._log(f"失败: {result['error']}")
-                self._finish(True)
-                return
-
-            self._log(f"")
-            for f in result.get("files", []):
-                size = os.path.getsize(f)
-                self._log(f"  {os.path.basename(f)}  ({human_size(size)})")
-            if result.get("images"):
-                self._log(f"  图片: {len(result['images'])} 张")
-            self._log("--- 完成 ---")
-
-            self._finish(False)
+            summary = (f"--- 完成: 成功 {ok_count} / 失败 {fail_count} ---"
+                       if len(urls) > 1
+                       else ("--- 完成 ---" if ok_count else "--- 失败 ---"))
+            self._log(summary)
+            self._finish(ok_count == 0)
 
         except Exception as e:
             self._log(f"失败: {e}")
