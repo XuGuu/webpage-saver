@@ -69,3 +69,13 @@
 ## README 更新
 
 「使用」章节:CLI 加 `--pdf` 示例;新增「打包成 macOS App」小节说明 `make_app.command`。
+
+## 评审后修正(2026-07-09 code review)
+
+- `need_images` 判断补齐 `"pdf" in formats`(否则 PDF-only 时图片不下载,导致 tmp html embed 为空)
+- `_build_chrome_pdf_cmd` 用 `urllib.parse.quote` 编码 file:// URL,兼容路径含空格/中文
+- `generate_pdf` 检查 subprocess 退出码 + 文件大小,失败时抛出带 stderr 的错误(不再静默)
+- gui.py 自动打开时:优先 HTML,其次 PDF(修 PDF-only 保存不弹窗)
+- 测试脚本路径从硬编码 `/Users/xugu/…` 改为 `os.path.dirname(save_webpage.__file__)`,可在任何机器上跑
+- README:补 `--pdf` CLI 示例 + 「打包成 macOS App」小节
+- CLAUDE.md 文件清单:补 `make_app.command`

@@ -11,7 +11,8 @@ from save_webpage import (parse_wechat_html, generate_html, pick_url_from_clipbo
                           open_file, scan_saved_articles,
                           detect_site,
                           parse_weibo_html, parse_bili_html,
-                          parse_juejin_html, parse_jianshu_html)
+                          parse_juejin_html, parse_jianshu_html,
+                          _build_chrome_pdf_cmd, generate_pdf, make_default_icon_png)
 
 
 def make_page(content_html: str, title: str = "测试文章") -> str:
@@ -1141,6 +1142,80 @@ class TestReview3Fixes(unittest.TestCase):
         data = parse_bili_html(html, "https://www.bilibili.com/read/cv1")
         # 两张图都应该在,不能只留 hdslb
         self.assertEqual(len(data["images"]), 2)
+
+
+class TestPDF(unittest.TestCase):
+    """PDF 导出(打包批次 #1)。"""
+
+    def test_command_contains_expected_flags(self):
+        cmd = _build_chrome_pdf_cmd("/usr/bin/chrome",
+                                     "/tmp/x.html", "/tmp/x.pdf")
+        self.assertEqual(cmd[0], "/usr/bin/chrome")
+        self.assertIn("--headless", cmd)
+        self.assertIn("--disable-gpu", cmd)
+        joined = " ".join(cmd)
+        self.assertIn("--print-to-pdf=/tmp/x.pdf", joined)
+        self.assertIn("file:///tmp/x.html", joined)
+
+    def test_generate_pdf_calls_subprocess(self):
+        """generate_pdf 成功路径:mock subprocess 返回 0,写空 PDF 文件。"""
+        import tempfile, os
+        from unittest.mock import patch, MagicMock
+        with tempfile.TemporaryDirectory() as tmp:
+            html_path = os.path.join(tmp, "x.html")
+            pdf_path = os.path.join(tmp, "x.pdf")
+            open(html_path, "w").write("<html></html>")
+
+            def fake_run(cmd, **kwargs):
+                # 模拟 Chrome 写出了 PDF
+                open(pdf_path, "wb").write(b"%PDF-1.4 fake\n")
+                return MagicMock(returncode=0)
+
+            with patch("save_webpage.get_chrome_path", return_value="/usr/bin/chrome"), \
+                 patch("save_webpage.subprocess.run", side_effect=fake_run):
+                ok = generate_pdf(html_path, pdf_path)
+            self.assertTrue(ok)
+            self.assertTrue(os.path.exists(pdf_path))
+
+    def test_generate_pdf_no_chrome_raises(self):
+        """找不到 Chrome 时应抛出明确错误消息。"""
+        from unittest.mock import patch
+        with patch("save_webpage.get_chrome_path",
+                   side_effect=FileNotFoundError("no chrome")):
+            with self.assertRaises(Exception) as ctx:
+                generate_pdf("/tmp/a.html", "/tmp/a.pdf")
+            self.assertIn("Chrome", str(ctx.exception))
+
+
+class TestDefaultIcon(unittest.TestCase):
+    """.app 默认图标生成(打包批次 #2)。"""
+
+    def test_png_signature(self):
+        """生成的字节流应以 PNG magic number 开头。"""
+        data = make_default_icon_png(1024)
+        self.assertTrue(data.startswith(b'\x89PNG\r\n\x1a\n'))
+
+    def test_size_encoded_in_header(self):
+        """IHDR chunk 里的宽/高应等于请求的 size。"""
+        data = make_default_icon_png(512)
+        # IHDR 起点固定在 offset 16,后 8 字节是 width+height (big-endian uint32)
+        import struct
+        w, h = struct.unpack(">II", data[16:24])
+        self.assertEqual(w, 512)
+        self.assertEqual(h, 512)
+
+
+class TestMakeAppScript(unittest.TestCase):
+    """make_app.command 是否具备可执行属性并存在。"""
+
+    def test_script_exists_and_executable(self):
+        import os, save_webpage
+        # 用 save_webpage.py 的位置定位仓库根,便于任何机器上跑
+        repo_root = os.path.dirname(os.path.abspath(save_webpage.__file__))
+        script = os.path.join(repo_root, "make_app.command")
+        self.assertTrue(os.path.exists(script), "make_app.command 不存在")
+        # 至少 rwxr-xr-x 或类似
+        self.assertTrue(os.access(script, os.X_OK), "缺 x 位")
 
 
 class TestParseWeibo(unittest.TestCase):

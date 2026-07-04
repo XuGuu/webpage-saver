@@ -45,6 +45,7 @@ class App:
         self.var_html = tk.BooleanVar(value=cfg.get("html", True))
         self.var_md = tk.BooleanVar(value=cfg.get("markdown", True))
         self.var_img = tk.BooleanVar(value=cfg.get("images", True))
+        self.var_pdf = tk.BooleanVar(value=cfg.get("pdf", False))
         self.var_subfolder = tk.BooleanVar(value=cfg.get("subfolder", True))
         self.var_date_prefix = tk.BooleanVar(value=cfg.get("date_prefix", False))
         self.var_auto_open = tk.BooleanVar(value=cfg.get("auto_open", True))
@@ -96,6 +97,7 @@ class App:
         ttk.Checkbutton(row_fmt, text="HTML（给看）", variable=self.var_html).pack(side="left")
         ttk.Checkbutton(row_fmt, text="Markdown（给 LLM）", variable=self.var_md).pack(side="left", padx=(16, 0))
         ttk.Checkbutton(row_fmt, text="图片", variable=self.var_img).pack(side="left", padx=(16, 0))
+        ttk.Checkbutton(row_fmt, text="PDF（需 Chrome）", variable=self.var_pdf).pack(side="left", padx=(16, 0))
 
         # ---- 目录结构 ----
         frm_struct = ttk.LabelFrame(self.root, text="选项", padding=8)
@@ -168,6 +170,7 @@ class App:
             "html": self.var_html.get(),
             "markdown": self.var_md.get(),
             "images": self.var_img.get(),
+            "pdf": self.var_pdf.get(),
             "subfolder": self.var_subfolder.get(),
             "date_prefix": self.var_date_prefix.get(),
             "auto_open": self.var_auto_open.get(),
@@ -190,7 +193,7 @@ class App:
             messagebox.showwarning("提示", "请输入至少一个 http(s) 开头的链接")
             return
 
-        if not self.var_html.get() and not self.var_md.get() and not self.var_img.get():
+        if not any([self.var_html.get(), self.var_md.get(), self.var_img.get(), self.var_pdf.get()]):
             messagebox.showwarning("提示", "请至少选择一个保存格式")
             return
 
@@ -227,6 +230,7 @@ class App:
             if self.var_html.get(): fmts.append("html")
             if self.var_md.get(): fmts.append("md")
             if self.var_img.get(): fmts.append("images")
+            if self.var_pdf.get(): fmts.append("pdf")
 
             ok_count = 0
             fail_count = 0
@@ -255,10 +259,16 @@ class App:
                         self._log(f"  图片: {len(result['images'])} 张")
                     ok_count += 1
                     self.session_successes.append((url, result))
-                    # 记住最后一个 HTML 路径,供自动打开
+                    # 记住最后一个可打开文件:优先 HTML,退而求其次 PDF
                     for f in result.get("files", []):
                         if f.endswith(".html"):
                             last_html_path = f
+                            break
+                    else:
+                        for f in result.get("files", []):
+                            if f.endswith(".pdf"):
+                                last_html_path = f
+                                break
                 except Exception as e:
                     self._log(f"  失败: {e}")
                     fail_count += 1

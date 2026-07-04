@@ -25,6 +25,7 @@ requirements.txt      依赖清单
 setup_windows.bat     Windows 一键启动
 setup_mac.sh          Mac 一键启动
 启动.command          Mac 双击启动的快捷方式
+make_app.command      打包成 macOS 真 .app(带图标,可拖 Dock)
 config.json           GUI 自动生成的用户偏好（保存目录、格式选择）
 README.md             使用说明
 CLAUDE.md             本文件

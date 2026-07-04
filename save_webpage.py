@@ -1531,7 +1531,8 @@ def save_article(url: str, output_dir: str, formats: list[str] | None = None,
 
     title = data["title"]
     keep_images = "images" in formats  # 是否保留图片文件夹
-    need_images = keep_images or "html" in formats or "md" in formats  # 是否需要下载图片
+    # HTML/MD/PDF 都要图;PDF 单独选中时也需要下载,让 embed_images 有素材
+    need_images = keep_images or "html" in formats or "md" in formats or "pdf" in formats
     log(f"标题: {title}")
     log(f"正文: {len(data['markdown'])} 字")
     log(f"图片: {len(data['images'])} 张")
@@ -1593,6 +1594,30 @@ def save_article(url: str, output_dir: str, formats: list[str] | None = None,
         output_files.append(md_path)
         log(f"Markdown: {md_path}")
 
+    # 生成 PDF(需要先有 HTML)
+    if "pdf" in formats:
+        # PDF 需要一个含图片(base64 内嵌)的 HTML 源
+        html_for_pdf = generate_html(data, img_files, img_dir, embed_images=True)
+        import tempfile
+        with tempfile.NamedTemporaryFile("w", suffix=".html", delete=False,
+                                        encoding="utf-8") as tmp:
+            tmp.write(html_for_pdf)
+            tmp_html = tmp.name
+        pdf_path = os.path.join(article_dir, f"{folder_name}.pdf")
+        try:
+            if generate_pdf(tmp_html, pdf_path):
+                output_files.append(pdf_path)
+                log(f"PDF: {pdf_path}")
+            else:
+                log("PDF: 生成失败(Chrome 未产出文件)")
+        except Exception as e:
+            log(f"PDF: 失败 - {e}")
+        finally:
+            try:
+                os.unlink(tmp_html)
+            except Exception:
+                pass
+
     # 如果不保留图片，删除 images 文件夹
     if not keep_images and os.path.isdir(img_dir):
         import shutil
@@ -1610,6 +1635,60 @@ def save_article(url: str, output_dir: str, formats: list[str] | None = None,
 
 
 # ==================== Chrome 管理 ====================
+
+def _build_chrome_pdf_cmd(chrome: str, html_path: str, pdf_path: str) -> list:
+    """构造 Chrome headless 导出 PDF 的命令行参数。"""
+    # URL 编码:避免路径含空格/中文时 Chrome 拒绝
+    file_url = "file://" + urllib.parse.quote(html_path, safe="/")
+    return [
+        chrome, "--headless", "--disable-gpu", "--no-sandbox",
+        "--no-pdf-header-footer",
+        f"--print-to-pdf={pdf_path}",
+        file_url,
+    ]
+
+
+def generate_pdf(html_path: str, pdf_path: str, timeout: int = 60) -> bool:
+    """用 Chrome headless 把 HTML 转成 PDF。成功返回 True,失败抛出带错误信息的异常。"""
+    try:
+        chrome = get_chrome_path()
+    except FileNotFoundError:
+        raise Exception("PDF 需要 Google Chrome。请先安装 Chrome 后再试。")
+    cmd = _build_chrome_pdf_cmd(chrome, html_path, pdf_path)
+    result = subprocess.run(cmd, timeout=timeout, capture_output=True)
+    # 兜三重检查:退出码 + 文件存在 + 文件非空
+    if result.returncode != 0:
+        stderr = (result.stderr or b"").decode("utf-8", errors="ignore")[:500]
+        raise Exception(f"Chrome PDF 生成失败(退出码 {result.returncode}):{stderr}")
+    if not os.path.exists(pdf_path) or os.path.getsize(pdf_path) == 0:
+        return False
+    return True
+
+
+def make_default_icon_png(size: int = 1024) -> bytes:
+    """零依赖构造一个渐变蓝色纯色 PNG(可当默认 App 图标)。"""
+    import struct, zlib
+
+    def chunk(kind: bytes, data: bytes) -> bytes:
+        return (struct.pack(">I", len(data)) + kind + data
+                + struct.pack(">I", zlib.crc32(kind + data)))
+
+    # IHDR: size×size, 8 bit, RGB(color type 2)
+    ihdr = struct.pack(">IIBBBBB", size, size, 8, 2, 0, 0, 0)
+    # 生成像素:从上到下蓝色渐变(顶部浅、底部深)
+    raw = bytearray()
+    for y in range(size):
+        raw.append(0)  # filter=none per row
+        r = 90 + (y * 40 // size)
+        g = 130 + (y * 20 // size)
+        b = 230 - (y * 60 // size)
+        raw.extend(bytes([r, g, b]) * size)
+    idat = zlib.compress(bytes(raw))
+    return (b'\x89PNG\r\n\x1a\n'
+            + chunk(b'IHDR', ihdr)
+            + chunk(b'IDAT', idat)
+            + chunk(b'IEND', b''))
+
 
 def get_chrome_path() -> str:
     system = platform.system()
@@ -1692,6 +1771,7 @@ def main():
     parser.add_argument("--no-images", action="store_true", help="不下载图片")
     parser.add_argument("--flat", action="store_true", help="不创建子文件夹，直接存到输出目录")
     parser.add_argument("--date-prefix", action="store_true", help="文件夹名前加日期前缀 YYYY-MM-DD_")
+    parser.add_argument("--pdf", action="store_true", help="额外生成 PDF(需 Chrome)")
     parser.add_argument("--launch-chrome", action="store_true", help="启动调试 Chrome")
     args = parser.parse_args()
 
@@ -1717,6 +1797,7 @@ def main():
     if not args.no_html: formats.append("html")
     if not args.no_md: formats.append("md")
     if not args.no_images: formats.append("images")
+    if args.pdf: formats.append("pdf")
 
     def log(msg):
         print(msg)

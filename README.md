@@ -49,7 +49,18 @@ python save_webpage.py "https://xxx" --no-html --no-images
 
 # 不建子文件夹，直接存到输出目录
 python save_webpage.py "https://xxx" --flat
+
+# 额外生成 PDF（需要 Chrome 已安装）
+python save_webpage.py "https://xxx" --pdf
 ```
+
+## 打包成 macOS App
+
+双击项目里的 `make_app.command`,会在项目所在目录旁生成 `文章保存工具.app`。
+
+- 拖到「应用程序」或 Dock 就能像正常 App 一样双击启动
+- 想换图标:把 `assets/icon.png`(1024×1024)换成自己喜欢的图片,再重跑 `make_app.command`
+- 首次双击若系统提示「无法验证开发者」,右键 → 打开 → 仍要打开
 
 ## 输出效果
 
