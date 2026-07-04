@@ -75,10 +75,14 @@ python save_webpage.py "https://xxx" --flat
 |------|------|---------|
 | 公众号 | requests + BeautifulSoup（保留图片位置） | 不需要 |
 | 小红书 | curl_cffi | 不需要 |
-| 知乎 | DrissionPage + Chrome | 部分页面需要 |
-| CSDN | 多方案自动降级（API → 手机版 → curl_cffi → print 模式） | 部分文章需要 |
-| IT之家 | requests + trafilatura | 不需要 |
-| 其他新闻站 | requests + trafilatura | 不需要 |
+| 知乎单答案/专栏 | DrissionPage + Chrome | 部分需要 |
+| 知乎问题页(多答案) | DrissionPage + Chrome,最多前 10 条回答 | 部分需要 |
+| CSDN | 多方案自动降级(API → 手机版 → curl_cffi → print 模式) | 部分需要 |
+| 微博长文 | curl_cffi + 选择器 + trafilatura 兜底 | 部分需要 |
+| B 站专栏/opus | requests + 选择器 + trafilatura 兜底 | 不需要 |
+| 掘金 | requests + 选择器 + trafilatura 兜底 | 不需要 |
+| 简书 | curl_cffi + 选择器 + trafilatura 兜底 | 不需要 |
+| IT之家 / 其他新闻站 | requests + trafilatura | 不需要 |
 
 公众号和小红书直接粘链接就能抓，不需要任何登录操作。知乎需要先点「启动 Chrome」并在 Chrome 中登录知乎。
 

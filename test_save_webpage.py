@@ -8,7 +8,10 @@ import unittest
 
 from save_webpage import (parse_wechat_html, generate_html, pick_url_from_clipboard,
                           split_urls, format_share_text, build_toc, build_index_html,
-                          open_file, scan_saved_articles)
+                          open_file, scan_saved_articles,
+                          detect_site,
+                          parse_weibo_html, parse_bili_html,
+                          parse_juejin_html, parse_jianshu_html)
 
 
 def make_page(content_html: str, title: str = "测试文章") -> str:
@@ -1087,6 +1090,160 @@ class TestCsdnLoginWall(unittest.TestCase):
         msg = str(ctx.exception)
         self.assertIn("登录 CSDN", msg)
         self.assertIn("浏览器", msg)
+
+
+class TestDetectSiteExpanded(unittest.TestCase):
+    """detect_site 应识别新增的 5 类站点。"""
+
+    def test_weibo(self):
+        self.assertEqual(detect_site("https://weibo.com/ttarticle/p/show?id=1234"), "weibo")
+        self.assertEqual(detect_site("https://m.weibo.cn/detail/5023456789"), "weibo")
+
+    def test_bilibili_article(self):
+        self.assertEqual(detect_site("https://www.bilibili.com/read/cv12345"), "bilibili")
+        self.assertEqual(detect_site("https://www.bilibili.com/opus/9999"), "bilibili")
+
+    def test_juejin(self):
+        self.assertEqual(detect_site("https://juejin.cn/post/7401234567890"), "juejin")
+
+    def test_jianshu(self):
+        self.assertEqual(detect_site("https://www.jianshu.com/p/abc123"), "jianshu")
+
+    def test_zhihu_question_page_still_maps_to_zhihu(self):
+        """知乎问题页仍走 zhihu 分支,由 extract_zhihu 内部区分单/多答案。"""
+        self.assertEqual(detect_site("https://www.zhihu.com/question/12345"), "zhihu")
+        self.assertEqual(detect_site("https://www.zhihu.com/question/12/answer/67"), "zhihu")
+
+    def test_weibo_card_domain(self):
+        """微博文章卡片域名 card.weibo.com 也识别为 weibo。"""
+        self.assertEqual(
+            detect_site("https://card.weibo.com/article/m/show/id/1234"), "weibo")
+
+
+class TestReview3Fixes(unittest.TestCase):
+    """本轮 code-review 确认项集中回归测试。"""
+
+    def test_weibo_selector_typo_fixed(self):
+        """div.article-main(正确拼写)应能匹配。"""
+        html = ('<html><body>'
+                '<div class="article-main"><p>正文来自 article-main</p></div>'
+                '</body></html>')
+        data = parse_weibo_html(html, "https://weibo.com/x")
+        self.assertIn("正文来自 article-main", data["markdown"])
+
+    def test_external_image_not_dropped(self):
+        """B 站文章里引用了外站(非 hdslb)的图片,也应该保留。"""
+        html = ('<html><body>'
+                '<div id="read-article-holder">'
+                '<p>这是一段足够长的正文,能通过 selector 20 字长度检查。</p>'
+                '<img src="https://example.com/external.jpg">'
+                '<img src="https://i0.hdslb.com/native.jpg"></div></body></html>')
+        data = parse_bili_html(html, "https://www.bilibili.com/read/cv1")
+        # 两张图都应该在,不能只留 hdslb
+        self.assertEqual(len(data["images"]), 2)
+
+
+class TestParseWeibo(unittest.TestCase):
+    """微博文章解析(用合成 fixture,不真的抓取)。"""
+
+    def test_ttarticle_layout(self):
+        html = '''<html><head>
+<meta property="og:title" content="微博长文标题">
+<title>标题 - 微博</title></head>
+<body>
+<div class="WB_editor_iframe_new">
+  <p>第一段正文</p>
+  <p>第二段正文</p>
+  <p><img src="https://wx1.sinaimg.cn/large/img_a.jpg"></p>
+</div>
+</body></html>'''
+        data = parse_weibo_html(html, "https://weibo.com/ttarticle/p/show?id=1")
+        self.assertEqual(data["site"], "微博")
+        self.assertIn("微博长文标题", data["title"])
+        self.assertIn("第一段正文", data["markdown"])
+        self.assertIn("第二段正文", data["markdown"])
+        self.assertEqual(len(data["images"]), 1)
+
+
+class TestParseBili(unittest.TestCase):
+    """B 站专栏/opus 解析。"""
+
+    def test_read_cv_layout(self):
+        html = '''<html><head><title>专栏标题</title></head><body>
+<h1 class="title">专栏标题</h1>
+<div id="read-article-holder">
+  <p>专栏正文 A</p>
+  <p>专栏正文 B</p>
+  <p><img data-src="https://i0.hdslb.com/bfs/pic1.jpg"></p>
+</div>
+</body></html>'''
+        data = parse_bili_html(html, "https://www.bilibili.com/read/cv1")
+        self.assertEqual(data["site"], "B站专栏")
+        self.assertIn("专栏标题", data["title"])
+        self.assertIn("专栏正文 A", data["markdown"])
+        self.assertEqual(len(data["images"]), 1)
+
+    def test_opus_layout(self):
+        html = '''<html><head><title>动态</title></head><body>
+<div class="opus-module-content">
+  <p>动态第一段</p>
+  <p>动态第二段</p>
+</div>
+</body></html>'''
+        data = parse_bili_html(html, "https://www.bilibili.com/opus/1")
+        self.assertIn("动态第一段", data["markdown"])
+
+
+class TestParseJuejin(unittest.TestCase):
+    """掘金文章解析。"""
+
+    def test_markdown_body_layout(self):
+        html = '''<html><head><title>掘金标题 - 掘金</title></head><body>
+<h1 class="article-title">掘金标题</h1>
+<div class="markdown-body">
+  <h2>小节</h2>
+  <p>正文内容第一段。</p>
+  <p>正文内容第二段。</p>
+  <p><img src="https://p3-juejin.byteimg.com/img_j.jpg"></p>
+</div>
+<div class="author-name">阿甲</div>
+</body></html>'''
+        data = parse_juejin_html(html, "https://juejin.cn/post/1")
+        self.assertEqual(data["site"], "掘金")
+        self.assertIn("掘金标题", data["title"])
+        self.assertIn("正文内容第一段", data["markdown"])
+        self.assertEqual(len(data["images"]), 1)
+
+
+class TestParseJianshu(unittest.TestCase):
+    """简书文章解析。"""
+
+    def test_article_layout(self):
+        html = '''<html><head><title>简书文章 - 简书</title></head><body>
+<h1 class="title">简书文章</h1>
+<article>
+  <p>简书正文一。</p>
+  <p>简书正文二。</p>
+  <p><img data-original-src="https://upload-images.jianshu.io/img_s.jpg"></p>
+</article>
+<div class="author">作者阿乙</div>
+</body></html>'''
+        data = parse_jianshu_html(html, "https://www.jianshu.com/p/1")
+        self.assertEqual(data["site"], "简书")
+        self.assertIn("简书文章", data["title"])
+        self.assertIn("简书正文一", data["markdown"])
+        self.assertEqual(len(data["images"]), 1)
+
+
+class TestZhihuMultiDetection(unittest.TestCase):
+    """URL 判断:问题页(无 /answer/)应触发多答案模式。"""
+
+    def test_is_question_page(self):
+        from save_webpage import _zhihu_is_question_page
+        self.assertTrue(_zhihu_is_question_page("https://www.zhihu.com/question/123"))
+        self.assertTrue(_zhihu_is_question_page("https://www.zhihu.com/question/123/"))
+        self.assertFalse(_zhihu_is_question_page("https://www.zhihu.com/question/123/answer/456"))
+        self.assertFalse(_zhihu_is_question_page("https://zhuanlan.zhihu.com/p/123"))
 
 
 if __name__ == "__main__":

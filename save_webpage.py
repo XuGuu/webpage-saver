@@ -279,7 +279,7 @@ def split_urls(text: str) -> list[str]:
 
 
 def detect_site(url: str) -> str:
-    """识别网站类型，返回: wechat / xhs / zhihu / csdn / generic"""
+    """识别网站类型，返回: wechat / xhs / zhihu / csdn / weibo / bilibili / juejin / jianshu / generic"""
     host = urllib.parse.urlparse(url).netloc.lower()
     if "mp.weixin.qq.com" in host:
         return "wechat"
@@ -289,7 +289,21 @@ def detect_site(url: str) -> str:
         return "zhihu"
     if "csdn.net" in host:
         return "csdn"
+    if "weibo.com" in host or "weibo.cn" in host:
+        return "weibo"
+    if "bilibili.com" in host and ("/read/" in url or "/opus/" in url):
+        return "bilibili"
+    if "juejin.cn" in host:
+        return "juejin"
+    if "jianshu.com" in host:
+        return "jianshu"
     return "generic"
+
+
+def _zhihu_is_question_page(url: str) -> bool:
+    """判断是否知乎问题页(应该抓所有答案)。/answer/ 结尾是单答案。"""
+    parsed = urllib.parse.urlparse(url)
+    return "/question/" in parsed.path and "/answer/" not in parsed.path
 
 
 # ==================== 图片下载 ====================
@@ -659,8 +673,10 @@ def extract_xhs(url: str) -> dict:
 # ==================== 提取器：知乎 ====================
 
 def extract_zhihu(url: str) -> dict:
-    """知乎文章/回答提取（需要 Chrome 调试端口）。"""
+    """知乎文章/回答/问题页提取（需要 Chrome 调试端口）。"""
     from DrissionPage import ChromiumPage, ChromiumOptions
+    from bs4 import BeautifulSoup
+    import time
 
     co = ChromiumOptions()
     co.set_local_port(CDP_PORT)
@@ -668,19 +684,53 @@ def extract_zhihu(url: str) -> dict:
 
     try:
         page.get(url)
-        import time
         time.sleep(4)
 
-        title = page.title.split(" - ")[0].strip() if page.title else "无标题"
+        # 问题页:遍历所有 .List-item 收集回答
+        if _zhihu_is_question_page(url):
+            title = page.title.split(" - ")[0].strip() if page.title else "问题"
+            answers = page.eles("css:.List-item", timeout=3)
+            if not answers:
+                # 兜底:某个回答框仍然出现
+                answers = page.eles("css:.AnswerItem", timeout=2)
+            parts = [f"# {title}\n"]
+            img_urls = []
+            for i, item in enumerate(answers[:10], 1):  # 最多 10 条,YAGNI
+                try:
+                    author_el = item.ele("css:.AuthorInfo-name", timeout=1)
+                    ans_author = author_el.text.strip() if author_el else f"匿名{i}"
+                except Exception:
+                    ans_author = f"匿名{i}"
+                content_el = None
+                for sel in (".RichContent-inner", ".RichText"):
+                    try:
+                        content_el = item.ele(f"css:{sel}", timeout=1)
+                        if content_el and len(content_el.text) > 30:
+                            break
+                    except Exception:
+                        continue
+                if not content_el:
+                    continue
+                ans_html = content_el.html
+                ans_md = trafilatura.extract(ans_html, output_format="markdown",
+                                             include_links=True) or content_el.text
+                parts.append(f"\n## 回答者:{ans_author}\n\n{ans_md}\n")
+                # 图片
+                soup = BeautifulSoup(ans_html, "html.parser")
+                for img in soup.find_all("img"):
+                    src = img.get("data-original") or img.get("data-actualsrc") or img.get("src")
+                    if src and not src.startswith("data:") and "zhimg" in src:
+                        img_urls.append(src)
+            if len(parts) == 1:
+                raise Exception("未找到任何回答,可能需要登录或页面结构变化")
+            return {"title": title, "author": "多位知乎作者",
+                    "markdown": "\n".join(parts), "images": img_urls,
+                    "site": "知乎", "date": ""}
 
-        # 尝试多种选择器
+        # 单答案/专栏文章:原逻辑
+        title = page.title.split(" - ")[0].strip() if page.title else "无标题"
         content = ""
-        selectors = [
-            ".Post-RichTextContainer",  # 专栏文章
-            ".RichContent-inner",       # 问答回答
-            ".RichText",                # 通用
-            "article",
-        ]
+        selectors = [".Post-RichTextContainer", ".RichContent-inner", ".RichText", "article"]
         for sel in selectors:
             try:
                 el = page.ele(f"css:{sel}", timeout=2)
@@ -689,21 +739,15 @@ def extract_zhihu(url: str) -> dict:
                     break
             except Exception:
                 continue
-
         if not content:
             body = page.ele("css:body")
             raise Exception(f"未找到正文内容。页面文本: {body.text[:100]}")
 
-        # 用 trafilatura 从提取到的 HTML 中获取 markdown
         md = trafilatura.extract(content, output_format="markdown", url=url,
                                  include_links=True) or ""
         if len(md) < 30:
-            # trafilatura 提取失败，直接用文本
-            text = re.sub(r'<[^>]+>', '', content)
-            md = text.strip()
+            md = re.sub(r'<[^>]+>', '', content).strip()
 
-        # 图片
-        from bs4 import BeautifulSoup
         soup = BeautifulSoup(content, "html.parser")
         img_urls = []
         for img in soup.find_all("img"):
@@ -711,7 +755,6 @@ def extract_zhihu(url: str) -> dict:
             if src and not src.startswith("data:") and "zhimg" in src:
                 img_urls.append(src)
 
-        # 作者
         author = ""
         try:
             author_el = page.ele("css:.AuthorInfo-name", timeout=2)
@@ -720,10 +763,8 @@ def extract_zhihu(url: str) -> dict:
         except Exception:
             pass
 
-        return {
-            "title": title, "author": author, "markdown": md,
-            "images": img_urls, "site": "知乎",
-        }
+        return {"title": title, "author": author, "markdown": md,
+                "images": img_urls, "site": "知乎", "date": ""}
 
     finally:
         page.quit()
@@ -896,6 +937,159 @@ def extract_csdn(url: str) -> dict:
         html = r.text
 
     return _csdn_parse_html(html, url)
+
+
+# ==================== 提取器:微博/B站/掘金/简书(fixture 可测) ====================
+
+def _extract_by_selectors(html: str, url: str, site: str,
+                          content_selectors: list, title_selectors: list,
+                          author_selectors: list = None,
+                          img_domain_marker: str = "") -> dict:
+    """通用"选择器优先 + trafilatura 兜底"提取器。fixture 可单测。"""
+    from bs4 import BeautifulSoup
+    soup = BeautifulSoup(html, "html.parser")
+
+    # 标题:先按 selector,后 og:title,最后 <title>
+    title = ""
+    for sel in title_selectors:
+        el = soup.select_one(sel)
+        if el:
+            t = el.get_text(strip=True)
+            if t and len(t) > 1:
+                title = t
+                break
+    if not title:
+        og = soup.find("meta", attrs={"property": "og:title"})
+        if og and og.get("content"):
+            title = og["content"].strip()
+    if not title:
+        tl = soup.find("title")
+        if tl:
+            title = re.sub(r'\s*[-|_].*$', '', tl.get_text(strip=True))
+    if not title:
+        title = "无标题"
+
+    # 作者
+    author = ""
+    for sel in (author_selectors or []):
+        el = soup.select_one(sel)
+        if el:
+            author = el.get_text(strip=True)
+            if author:
+                break
+
+    # 正文:按 selector 找第一个非空容器
+    content_el = None
+    for sel in content_selectors:
+        el = soup.select_one(sel)
+        if el and len(el.get_text(strip=True)) > 20:
+            content_el = el
+            break
+
+    if content_el:
+        content_html = str(content_el)
+        md = trafilatura.extract(content_html, output_format="markdown", url=url,
+                                 include_links=True, include_images=False) or ""
+        if len(md) < 30:
+            md = content_el.get_text(separator="\n", strip=True)
+    else:
+        # 兜底:整页 trafilatura
+        md = trafilatura.extract(html, output_format="markdown", url=url,
+                                 include_links=True, include_images=False) or ""
+
+    # 图片:content_el 里所有图都收(已经限定在正文范围);
+    # 兜底 scope=整页时才用 img_domain_marker 过滤,避免收头像/按钮之类
+    img_urls = []
+    if content_el:
+        for img in content_el.find_all("img"):
+            src = (img.get("data-src") or img.get("data-original-src")
+                   or img.get("data-original") or img.get("src") or "").strip()
+            if src and not src.startswith("data:"):
+                img_urls.append(src)
+    else:
+        for img in soup.find_all("img"):
+            src = (img.get("data-src") or img.get("data-original-src")
+                   or img.get("data-original") or img.get("src") or "").strip()
+            if src and not src.startswith("data:"):
+                if not img_domain_marker or img_domain_marker in src:
+                    img_urls.append(src)
+
+    return {"title": title, "author": author, "markdown": md,
+            "images": img_urls, "site": site, "date": ""}
+
+
+def parse_weibo_html(html: str, url: str) -> dict:
+    return _extract_by_selectors(
+        html, url, "微博",
+        content_selectors=["div.WB_editor_iframe_new", "article", "div.article-main",
+                           "div.wbpro-feed-content"],
+        title_selectors=["h1.title", "meta[property='og:title']"],
+        author_selectors=["a.author", ".user-info .name"],
+        img_domain_marker="sinaimg")
+
+
+def parse_bili_html(html: str, url: str) -> dict:
+    return _extract_by_selectors(
+        html, url, "B站专栏",
+        content_selectors=["div#read-article-holder", "div.opus-module-content",
+                           "div.article-holder", "article"],
+        title_selectors=["h1.title", "h1.opus-title"],
+        author_selectors=["a.author", ".up-name"],
+        img_domain_marker="hdslb")
+
+
+def parse_juejin_html(html: str, url: str) -> dict:
+    return _extract_by_selectors(
+        html, url, "掘金",
+        content_selectors=["div.markdown-body", "article.article"],
+        title_selectors=["h1.article-title", "h1"],
+        author_selectors=["a.author-name", ".author-name"],
+        img_domain_marker="juejin")
+
+
+def parse_jianshu_html(html: str, url: str) -> dict:
+    return _extract_by_selectors(
+        html, url, "简书",
+        content_selectors=["article", "div._2rhmJa", "div.show-content"],
+        title_selectors=["h1.title", "h1._1RuRku", "h1"],
+        author_selectors=[".author .name", "a.author"],
+        img_domain_marker="jianshu")
+
+
+def _fetch_and_parse(url: str, parse_fn, use_cffi: bool = False) -> dict:
+    """通用抓取+解析:先请求,再交给 parse_fn。"""
+    if use_cffi:
+        from curl_cffi import requests as cffi_requests
+        r = cffi_requests.get(url, impersonate="chrome",
+                              headers={"Accept-Language": "zh-CN,zh;q=0.9"})
+        if r.status_code != 200:
+            raise Exception(f"抓取返回 {r.status_code}(可能被反爬拦截或需要登录)")
+        html = r.text
+    else:
+        r = requests.get(url, headers=HEADERS, timeout=20)
+        r.raise_for_status()
+        if r.encoding and r.encoding.lower() != "utf-8":
+            r.encoding = r.apparent_encoding
+        html = r.text
+    if not html:
+        raise Exception("抓取失败,页面为空")
+    return parse_fn(html, url)
+
+
+def extract_weibo(url: str) -> dict:
+    return _fetch_and_parse(url, parse_weibo_html, use_cffi=True)
+
+
+def extract_bili(url: str) -> dict:
+    return _fetch_and_parse(url, parse_bili_html, use_cffi=False)
+
+
+def extract_juejin(url: str) -> dict:
+    return _fetch_and_parse(url, parse_juejin_html, use_cffi=False)
+
+
+def extract_jianshu(url: str) -> dict:
+    return _fetch_and_parse(url, parse_jianshu_html, use_cffi=True)
 
 
 # ==================== 提取器：通用 ====================
@@ -1322,6 +1516,14 @@ def save_article(url: str, output_dir: str, formats: list[str] | None = None,
             data = extract_zhihu(url)
         elif site_type == "csdn":
             data = extract_csdn(url)
+        elif site_type == "weibo":
+            data = extract_weibo(url)
+        elif site_type == "bilibili":
+            data = extract_bili(url)
+        elif site_type == "juejin":
+            data = extract_juejin(url)
+        elif site_type == "jianshu":
+            data = extract_jianshu(url)
         else:
             data = extract_generic(url)
     except Exception as e:

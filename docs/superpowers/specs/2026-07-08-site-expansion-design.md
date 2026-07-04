@@ -84,3 +84,10 @@ detect_site 加对应识别测试。
 ## README 更新
 
 支持的网站表格里新增 5 行,标注反爬难度和登录需求。
+
+## 评审后修正(2026-07-08 code review)
+
+- 修正 selector typo:`div.artical-main` → `div.article-main`(拼写错,原本永远不匹配)
+- 图片过滤策略调整:content_el 里的所有图都保留(已经限定在正文范围),
+  只在 fallback 走整页 scope 时才用 img_domain_marker 过滤——避免正文里外链图被误丢
+- `_fetch_and_parse` 里 curl_cffi 非 200 状态改为抛出带状态码的错误,不再静默变"页面为空"
