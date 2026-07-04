@@ -26,6 +26,8 @@ setup_windows.bat     Windows 一键启动
 setup_mac.sh          Mac 一键启动
 启动.command          Mac 双击启动的快捷方式
 make_app.command      打包成 macOS 真 .app(带图标,可拖 Dock)
+make_app.bat          Windows:双击生成桌面快捷方式
+assets/make_shortcut.ps1  make_app.bat 内部用的 PowerShell 脚本
 config.json           GUI 自动生成的用户偏好（保存目录、格式选择）
 README.md             使用说明
 CLAUDE.md             本文件

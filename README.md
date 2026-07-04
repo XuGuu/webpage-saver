@@ -62,6 +62,14 @@ python save_webpage.py "https://xxx" --pdf
 - 想换图标:把 `assets/icon.png`(1024×1024)换成自己喜欢的图片,再重跑 `make_app.command`
 - 首次双击若系统提示「无法验证开发者」,右键 → 打开 → 仍要打开
 
+## 打包成 Windows 快捷方式
+
+双击项目里的 `make_app.bat`,会在桌面生成「文章保存工具」快捷方式。
+
+- 首次运行会自动生成 `assets/icon.ico`(蓝色渐变)
+- 想换图标:把 `assets/icon.ico` 换成自己喜欢的图,再双击 `make_app.bat` 一次
+- 需要已安装 Python 3(勾选过"Add to PATH"),且 `pythonw.exe` 可用(官方 python.org 安装包默认包含)
+
 ## 输出效果
 
 默认输出（HTML + Markdown + 图片）：

@@ -1690,6 +1690,25 @@ def make_default_icon_png(size: int = 1024) -> bytes:
             + chunk(b'IEND', b''))
 
 
+def make_default_icon_ico(size: int = 256) -> bytes:
+    """把 make_default_icon_png 的 PNG 包成 Windows ICO 容器(Vista+ 支持内嵌 PNG)。
+
+    size 只允许 16-256:ICO dir entry 里的 w/h 是单字节,超过 255 用 0 表示 256。
+    """
+    import struct
+    if not 16 <= size <= 256:
+        raise ValueError(f"size 必须在 16-256 之间,得到 {size}")
+    png = make_default_icon_png(size)
+    # 256 特殊:ICO 单字节 w/h 表达不了 256,用 0 表示
+    w = 0 if size == 256 else size
+    h = 0 if size == 256 else size
+    # Header: reserved(2)=0, type(2)=1 icon, count(2)=1
+    header = struct.pack("<HHH", 0, 1, 1)
+    # Dir entry (16 bytes): w,h,color=0,reserved=0, planes=1, bitcount=32, size, offset
+    entry = struct.pack("<BBBBHHII", w, h, 0, 0, 1, 32, len(png), 22)
+    return header + entry + png
+
+
 def get_chrome_path() -> str:
     system = platform.system()
     if system == "Windows":

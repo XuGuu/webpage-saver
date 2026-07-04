@@ -12,7 +12,8 @@ from save_webpage import (parse_wechat_html, generate_html, pick_url_from_clipbo
                           detect_site,
                           parse_weibo_html, parse_bili_html,
                           parse_juejin_html, parse_jianshu_html,
-                          _build_chrome_pdf_cmd, generate_pdf, make_default_icon_png)
+                          _build_chrome_pdf_cmd, generate_pdf,
+                          make_default_icon_png, make_default_icon_ico)
 
 
 def make_page(content_html: str, title: str = "测试文章") -> str:
@@ -1216,6 +1217,47 @@ class TestMakeAppScript(unittest.TestCase):
         self.assertTrue(os.path.exists(script), "make_app.command 不存在")
         # 至少 rwxr-xr-x 或类似
         self.assertTrue(os.access(script, os.X_OK), "缺 x 位")
+
+    def test_windows_bat_exists(self):
+        import os, save_webpage
+        repo_root = os.path.dirname(os.path.abspath(save_webpage.__file__))
+        bat = os.path.join(repo_root, "make_app.bat")
+        self.assertTrue(os.path.exists(bat), "make_app.bat 不存在")
+        self.assertGreater(os.path.getsize(bat), 0, "空文件")
+
+
+class TestDefaultIconIco(unittest.TestCase):
+    """默认 ICO 图标生成(Windows 打包用)。"""
+
+    def test_ico_signature(self):
+        """ICO 文件以 magic \\x00\\x00\\x01\\x00 开头(reserved=0, type=1 icon)。"""
+        data = make_default_icon_ico()
+        self.assertEqual(data[:4], b'\x00\x00\x01\x00')
+
+    def test_ico_declares_one_image(self):
+        """count 字段应为 1(单尺寸)。"""
+        import struct
+        data = make_default_icon_ico()
+        count = struct.unpack("<H", data[4:6])[0]
+        self.assertEqual(count, 1)
+
+    def test_ico_embeds_png(self):
+        """dir entry 指向的 offset 处应是 PNG 数据。"""
+        import struct
+        data = make_default_icon_ico()
+        # dir entry: offset 6 起,image_offset 在 dir entry 的 +12 处
+        image_offset = struct.unpack("<I", data[18:22])[0]
+        self.assertTrue(data[image_offset:image_offset + 8]
+                        == b'\x89PNG\r\n\x1a\n')
+
+    def test_ico_size_field_matches_actual(self):
+        """dir entry 里的 bytes_in_res 应等于内嵌 PNG 字节数。"""
+        import struct
+        data = make_default_icon_ico()
+        declared = struct.unpack("<I", data[14:18])[0]
+        image_offset = struct.unpack("<I", data[18:22])[0]
+        actual = len(data) - image_offset
+        self.assertEqual(declared, actual)
 
 
 class TestParseWeibo(unittest.TestCase):

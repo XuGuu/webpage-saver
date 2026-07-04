@@ -74,3 +74,11 @@ offset 22   ... PNG data ...
 ## README 更新
 
 「打包成 macOS App」下方新增「打包成 Windows 快捷方式」小节。
+
+## 评审后修正(2026-07-09 code review)
+
+- **PowerShell 转义地狱**:原实现把 PowerShell 命令用 `\"..\"` 塞在 `.bat` 里,但 PowerShell 双引号里 `\` 不是转义符,`\"` 会截断字符串。改用**独立 `.ps1` 文件**(`assets/make_shortcut.ps1`),`.bat` 通过 `powershell -File` 调用,规避 batch/pwsh 双重转义,PowerShell 侧用 `Join-Path` 拼路径避免手工加引号。
+- **`chcp 65001`**:.bat 开头切 UTF-8 代码页,保证 `文章保存工具.lnk` 中文文件名在各种 Windows 语言/区域下都正确。
+- **检查 `pythonw` 存在**:如果用户装的是不带 pythonw 的 Python(如 conda 极少数配置),提前给明确错误消息,不再静默失败。
+- **`make_default_icon_ico` 加 size 断言**:限制在 16-256(ICO w/h 字节表达上限),避免误传 512/1024 导致声明尺寸与 PNG 尺寸不一致。
+- CLAUDE.md 文件清单同步补 `make_app.bat` 和 `assets/make_shortcut.ps1`
