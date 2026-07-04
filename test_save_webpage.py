@@ -8,7 +8,7 @@ import unittest
 
 from save_webpage import (parse_wechat_html, generate_html, pick_url_from_clipboard,
                           split_urls, format_share_text, build_toc, build_index_html,
-                          open_file)
+                          open_file, scan_saved_articles)
 
 
 def make_page(content_html: str, title: str = "测试文章") -> str:
@@ -953,6 +953,140 @@ class TestBatchShareTracking(unittest.TestCase):
         self.assertIn("https://b.com", text)
         # 甲的最后一行(url)后应有空行然后是乙
         self.assertRegex(text, r"https://a\.com\n\n乙")
+
+
+def _seed_saved_dir(root, name, author="A", date="2026-01-01"):
+    """在 root 下造一篇带 .saved-article 标记的文章目录。"""
+    import os
+    sub = os.path.join(root, name)
+    os.makedirs(sub)
+    open(os.path.join(sub, ".saved-article"), "w").close()
+    with open(os.path.join(sub, f"{name}.html"), "w", encoding="utf-8") as f:
+        f.write(f'<!DOCTYPE html><html><head><title>{name}</title></head>'
+                f'<body><h1>{name}</h1><div class="meta">'
+                f'<span class="author">{author}</span>'
+                f'<span class="date">{date}</span></div></body></html>')
+
+
+class TestScanSavedArticles(unittest.TestCase):
+    """扫描保存目录返回结构化元数据(知识库化 #3 复用)。"""
+
+    def test_returns_list_of_dicts(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as root:
+            _seed_saved_dir(root, "甲", "作者A", "2026-01-01")
+            _seed_saved_dir(root, "乙", "作者B", "2026-06-15")
+            arts = scan_saved_articles(root)
+            self.assertEqual(len(arts), 2)
+            self.assertTrue(all(isinstance(a, dict) for a in arts))
+            titles = [a["title"] for a in arts]
+            self.assertIn("甲", titles)
+            self.assertIn("乙", titles)
+
+    def test_result_has_expected_keys(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as root:
+            _seed_saved_dir(root, "甲", "A", "2026-01-01")
+            arts = scan_saved_articles(root)
+            self.assertGreaterEqual(len(arts), 1)
+            for key in ("title", "author", "date", "html_path", "folder"):
+                self.assertIn(key, arts[0])
+
+    def test_skips_unmarked_dirs(self):
+        import tempfile, os
+        with tempfile.TemporaryDirectory() as root:
+            _seed_saved_dir(root, "真文章", "A", "2026-01-01")
+            # 无标记目录
+            os.makedirs(os.path.join(root, "杂物"))
+            with open(os.path.join(root, "杂物", "foo.html"), "w") as f:
+                f.write("<html>随便</html>")
+            arts = scan_saved_articles(root)
+            self.assertEqual(len(arts), 1)
+            self.assertEqual(arts[0]["title"], "真文章")
+
+    def test_sorted_by_mtime_desc(self):
+        """新的在前。"""
+        import tempfile, os, time
+        with tempfile.TemporaryDirectory() as root:
+            _seed_saved_dir(root, "旧", "A", "2026-01-01")
+            time.sleep(0.05)
+            _seed_saved_dir(root, "新", "B", "2026-06-01")
+            arts = scan_saved_articles(root)
+            self.assertEqual(arts[0]["title"], "新")
+
+
+class TestIndexSearch(unittest.TestCase):
+    """目录索引里的搜索框(知识库化 #1)。"""
+
+    def test_index_has_search_input(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as root:
+            _seed_saved_dir(root, "文章")
+            idx = build_index_html(root)
+            self.assertIn('type="search"', idx)
+
+    def test_search_javascript_present(self):
+        """需要有 JS 监听 input 事件来过滤 card。"""
+        import tempfile
+        with tempfile.TemporaryDirectory() as root:
+            _seed_saved_dir(root, "文章")
+            idx = build_index_html(root)
+            # 简单验证:含 querySelectorAll .card 和 input 事件
+            self.assertIn(".card", idx)
+            self.assertRegex(idx, r'addEventListener\s*\(\s*[\'"]input[\'"]')
+
+
+class TestIndexStats(unittest.TestCase):
+    """索引顶部统计条(知识库化 #2)。"""
+
+    def test_stats_shows_total_count(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as root:
+            _seed_saved_dir(root, "甲")
+            _seed_saved_dir(root, "乙")
+            _seed_saved_dir(root, "丙")
+            idx = build_index_html(root)
+            self.assertIn("共 3 篇", idx)
+
+    def test_stats_shows_date_range(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as root:
+            _seed_saved_dir(root, "甲", "A", "2026-01-01")
+            _seed_saved_dir(root, "乙", "B", "2026-06-15")
+            idx = build_index_html(root)
+            self.assertIn("2026-01-01", idx)
+            self.assertIn("2026-06-15", idx)
+
+    def test_stats_shows_top_sources(self):
+        """作者数量 Top 前几名要出现在统计里。"""
+        import tempfile
+        with tempfile.TemporaryDirectory() as root:
+            for i in range(3):
+                _seed_saved_dir(root, f"甲{i}", "热门作者")
+            _seed_saved_dir(root, "乙", "冷门作者")
+            idx = build_index_html(root)
+            # 热门作者应有 "3" 关联
+            self.assertRegex(idx, r'热门作者.{0,10}3')
+
+    def test_empty_dir_shows_no_stats(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as root:
+            idx = build_index_html(root)
+            self.assertNotIn("共 0 篇", idx)
+
+
+class TestCsdnLoginWall(unittest.TestCase):
+    """CSDN 登录墙抛出更友好的错误信息(知识库化 #4)。"""
+
+    def test_login_wall_error_mentions_login_steps(self):
+        """短内容 + 含'登录'字样应抛出带指引的错误。"""
+        from save_webpage import _csdn_parse_html
+        html = '<html><body><h1>标题</h1><p>短</p>登录后可查看全文</body></html>'
+        with self.assertRaises(Exception) as ctx:
+            _csdn_parse_html(html, "https://blog.csdn.net/x")
+        msg = str(ctx.exception)
+        self.assertIn("登录 CSDN", msg)
+        self.assertIn("浏览器", msg)
 
 
 if __name__ == "__main__":

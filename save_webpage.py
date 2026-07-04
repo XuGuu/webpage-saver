@@ -81,50 +81,94 @@ def format_share_text(data: dict, url: str = "") -> str:
     return "\n".join(lines)
 
 
-def build_index_html(root_dir: str) -> str:
-    """扫描 root_dir 下含 .saved-article 标记的子文件夹里的 HTML,生成目录索引。"""
-    import html as _h
-    cards = []
+def scan_saved_articles(root_dir: str) -> list:
+    """扫描 root_dir 下含 .saved-article 标记的子文件夹,返回文章元数据列表。
+
+    每项: {"title","author","date","html_path","folder","mtime"}。按 mtime 倒序(新的在前)。
+    """
+    result = []
     if not os.path.isdir(root_dir):
-        return ""
-    entries = []
+        return result
     for name in os.listdir(root_dir):
         sub = os.path.join(root_dir, name)
         if not os.path.isdir(sub):
             continue
-        # 只识别有 .saved-article 标记的目录(避免桌面上其他 HTML 被误加)
         if not os.path.exists(os.path.join(sub, ".saved-article")):
             continue
+        html_path = None
         for f in os.listdir(sub):
             if f.endswith(".html"):
                 html_path = os.path.join(sub, f)
-                entries.append((os.path.getmtime(html_path), name, f, html_path))
                 break
-    # 按 mtime 倒序:最新的在前
-    entries.sort(reverse=True)
-
-    for mtime, folder_name, fname, html_path in entries:
+        if not html_path:
+            continue
         try:
             with open(html_path, encoding="utf-8") as fh:
                 html = fh.read()
         except Exception:
             continue
         title_m = re.search(r'<h1[^>]*>(.*?)</h1>', html, re.DOTALL)
-        title = re.sub(r'<[^>]+>', '', title_m.group(1)).strip() if title_m else folder_name
+        title = re.sub(r'<[^>]+>', '', title_m.group(1)).strip() if title_m else name
         author_m = re.search(r'<span class="author">(.*?)</span>', html)
         author = author_m.group(1).strip() if author_m else ""
         date_m = re.search(r'<span class="date">(.*?)</span>', html)
         date = date_m.group(1).strip() if date_m else ""
+        result.append({
+            "title": title,
+            "author": author,
+            "date": date,
+            "html_path": html_path,
+            "folder": name,
+            "mtime": os.path.getmtime(html_path),
+        })
+    result.sort(key=lambda x: x["mtime"], reverse=True)
+    return result
 
-        rel_href = urllib.parse.quote(f"{folder_name}/{fname}")
-        # 转义元数据,防止索引页 XSS
-        title_esc = _h.escape(title)
-        meta_line = _h.escape(" · ".join(x for x in (author, date) if x))
+
+def _build_stats_bar(articles: list) -> str:
+    """构造统计条 HTML。"""
+    import html as _h
+    if not articles:
+        return ""
+    total = len(articles)
+    dates = sorted(a["date"] for a in articles if a["date"])
+    date_range = ""
+    if dates:
+        if dates[0] == dates[-1]:
+            date_range = dates[0]
+        else:
+            date_range = f'{dates[0]} → {dates[-1]}'
+    # Top 3 作者
+    from collections import Counter
+    author_counts = Counter(a["author"] for a in articles if a["author"])
+    top = author_counts.most_common(3)
+    top_html = " · ".join(f'{_h.escape(a)} {n}' for a, n in top) if top else ""
+
+    parts = [f'<span class="stat"><strong>共 {total} 篇</strong></span>']
+    if date_range:
+        parts.append(f'<span class="stat">{date_range}</span>')
+    if top_html:
+        parts.append(f'<span class="stat">Top: {top_html}</span>')
+    return '<div class="stats-bar">' + "".join(parts) + '</div>'
+
+
+def build_index_html(root_dir: str) -> str:
+    """生成目录索引 HTML(含搜索框、统计条、卡片列表)。"""
+    import html as _h
+    articles = scan_saved_articles(root_dir)
+    cards = []
+    for a in articles:
+        rel_href = urllib.parse.quote(f"{a['folder']}/{os.path.basename(a['html_path'])}")
+        title_esc = _h.escape(a["title"])
+        meta_line = _h.escape(" · ".join(x for x in (a["author"], a["date"]) if x))
         cards.append(f'''
 <a class="card" href="{rel_href}">
   <div class="card-title">{title_esc}</div>
   <div class="card-meta">{meta_line}</div>
 </a>''')
+    stats_bar = _build_stats_bar(articles)
+    search_input = ('<input type="search" class="search" placeholder="搜索标题或作者..." autofocus>'
+                    if articles else "")
 
     body = "".join(cards) if cards else '<p class="empty">还没有保存过文章</p>'
     return f'''<!DOCTYPE html>
@@ -137,7 +181,14 @@ def build_index_html(root_dir: str) -> str:
 body {{ font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif;
        max-width: 800px; margin: 40px auto; padding: 20px;
        background: #fff; color: #333; }}
-h1 {{ font-size: 22px; margin-bottom: 24px; }}
+h1 {{ font-size: 22px; margin-bottom: 12px; }}
+.stats-bar {{ font-size: 13px; color: #666; margin-bottom: 16px;
+              padding: 10px 14px; background: #f6f8fa; border-radius: 6px; }}
+.stats-bar .stat {{ margin-right: 16px; }}
+.search {{ width: 100%; box-sizing: border-box; padding: 10px 14px; margin-bottom: 16px;
+           font-size: 14px; border: 1px solid #ddd; border-radius: 6px;
+           background: #fff; color: #333; outline: none; }}
+.search:focus {{ border-color: #999; }}
 .card {{ display: block; padding: 14px 16px; margin: 10px 0;
         background: #fafafa; border-radius: 8px; border: 1px solid #eee;
         text-decoration: none; color: inherit; transition: background 0.15s; }}
@@ -145,9 +196,13 @@ h1 {{ font-size: 22px; margin-bottom: 24px; }}
 .card-title {{ font-size: 15px; font-weight: 500; color: #1a1a1a; margin-bottom: 4px; }}
 .card-meta {{ font-size: 12px; color: #888; }}
 .empty {{ color: #999; text-align: center; padding: 40px; }}
+.no-match {{ color: #999; text-align: center; padding: 20px; display: none; }}
 @media (prefers-color-scheme: dark) {{
   body {{ background: #1a1a1a; color: #d4d4d4; }}
   h1 {{ color: #f0f0f0; }}
+  .stats-bar {{ background: #222; color: #aaa; }}
+  .search {{ background: #222; border-color: #333; color: #d4d4d4; }}
+  .search:focus {{ border-color: #666; }}
   .card {{ background: #222; border-color: #333; }}
   .card:hover {{ background: #2a2a2a; }}
   .card-title {{ color: #f0f0f0; }}
@@ -156,8 +211,30 @@ h1 {{ font-size: 22px; margin-bottom: 24px; }}
 </style>
 </head>
 <body>
-<h1>我的文章目录 <small style="color:#999;font-size:14px;font-weight:normal;">共 {len(entries)} 篇</small></h1>
-{body}
+<h1>我的文章目录</h1>
+{stats_bar}
+{search_input}
+<div class="cards">{body}</div>
+<div class="no-match">没有匹配的文章</div>
+<script>
+const input = document.querySelector('.search');
+const cards = document.querySelectorAll('.card');
+const noMatch = document.querySelector('.no-match');
+if (input) {{
+  input.addEventListener('input', () => {{
+    const q = input.value.trim().toLowerCase();
+    let visible = 0;
+    cards.forEach(card => {{
+      const text = (card.querySelector('.card-title').textContent + ' '
+                    + card.querySelector('.card-meta').textContent).toLowerCase();
+      const show = !q || text.includes(q);
+      card.style.display = show ? '' : 'none';
+      if (show) visible++;
+    }});
+    noMatch.style.display = visible === 0 ? 'block' : 'none';
+  }});
+}}
+</script>
 </body>
 </html>'''
 
@@ -716,9 +793,14 @@ def _csdn_parse_html(html: str, url: str) -> dict:
     if len(md) < 50 and content_el:
         md = content_el.get_text(separator="\n", strip=True)
 
-    # 检测登录墙截断
+    # 检测登录墙截断,给出更明确的引导步骤
     if len(md) < 200 and "登录" in html:
-        raise Exception("CSDN 需要登录才能看全文，请在浏览器中登录 CSDN 后重试")
+        raise Exception(
+            "CSDN 文章需要登录才能看全文。\n"
+            "解决办法:\n"
+            "1. 用浏览器打开该文章\n"
+            "2. 登录 CSDN 账号(免费)\n"
+            "3. 回到本工具重新点「开始保存」")
 
     # 图片
     img_urls = []

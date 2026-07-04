@@ -12,7 +12,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from save_webpage import (save_article, check_cdp, launch_chrome_debug,
                           detect_site, human_size, pick_url_from_clipboard,
                           split_urls, format_share_text, build_index_html,
-                          open_file)
+                          open_file, scan_saved_articles)
 
 CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
 INDEX_FILE = "目录.html"
@@ -127,6 +127,9 @@ class App:
         self.btn_index = ttk.Button(frm_actions, text="📚 打开目录",
                                     command=self._open_index)
         self.btn_index.pack(side="left", padx=(8, 0))
+        self.btn_recent = ttk.Button(frm_actions, text="🕘 最近保存",
+                                     command=self._show_recent)
+        self.btn_recent.pack(side="left", padx=(8, 0))
         self.btn_retry = ttk.Button(frm_actions, text="🔁 重试失败",
                                     command=self._retry_failed, state="disabled")
         self.btn_retry.pack(side="left", padx=(8, 0))
@@ -297,6 +300,45 @@ class App:
         self.root.clipboard_clear()
         self.root.clipboard_append(share)
         self._log(f"已复制 {len(blocks)} 篇到剪贴板")
+
+    def _show_recent(self):
+        """弹窗显示最近保存过的文章列表,双击项打开对应 HTML。"""
+        articles = scan_saved_articles(self.var_dir.get())
+        win = tk.Toplevel(self.root)
+        win.title("最近保存")
+        win.geometry("500x520")
+        win.transient(self.root)  # 保持在主窗口之上,避免被藏在后面
+
+        if not articles:
+            ttk.Label(win, text="还没有保存过文章",
+                      foreground="#999").pack(expand=True)
+            return
+
+        frame = ttk.Frame(win, padding=8)
+        frame.pack(fill="both", expand=True)
+
+        listbox = tk.Listbox(frame, font=("", 11), activestyle="none")
+        listbox.pack(side="left", fill="both", expand=True)
+        sb = ttk.Scrollbar(frame, command=listbox.yview)
+        sb.pack(side="right", fill="y")
+        listbox.configure(yscrollcommand=sb.set)
+
+        paths = []
+        for a in articles[:20]:
+            meta = " · ".join(x for x in (a["author"], a["date"]) if x)
+            label = f"{a['title']}    ({meta})" if meta else a["title"]
+            listbox.insert("end", label)
+            paths.append(a["html_path"])
+
+        def on_open(_=None):
+            sel = listbox.curselection()
+            if sel:
+                open_file(paths[sel[0]])
+        listbox.bind("<Double-Button-1>", on_open)
+        listbox.bind("<Return>", on_open)
+
+        ttk.Button(win, text="打开选中",
+                   command=on_open).pack(pady=(0, 8))
 
     def _open_index(self):
         index_path = os.path.join(self.var_dir.get(), INDEX_FILE)
