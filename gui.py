@@ -12,10 +12,11 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from save_webpage import (save_article, check_cdp, launch_chrome_debug,
                           detect_site, human_size, pick_url_from_clipboard,
                           split_urls, format_share_text, build_index_html,
-                          open_file, scan_saved_articles)
+                          open_file, scan_saved_articles, build_dashboard_html)
 
 CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
 INDEX_FILE = "目录.html"
+DASHBOARD_FILE = "dashboard.html"
 
 
 def load_config() -> dict:
@@ -132,6 +133,9 @@ class App:
         self.btn_recent = ttk.Button(frm_actions, text="🕘 最近保存",
                                      command=self._show_recent)
         self.btn_recent.pack(side="left", padx=(8, 0))
+        self.btn_dashboard = ttk.Button(frm_actions, text="📊 统计",
+                                        command=self._open_dashboard)
+        self.btn_dashboard.pack(side="left", padx=(8, 0))
         self.btn_retry = ttk.Button(frm_actions, text="🔁 重试失败",
                                     command=self._retry_failed, state="disabled")
         self.btn_retry.pack(side="left", padx=(8, 0))
@@ -283,14 +287,17 @@ class App:
             if last_html_path and self.var_auto_open.get():
                 open_file(last_html_path)
 
-            # 更新目录索引
+            # 更新目录索引 + 统计仪表盘(共用一次扫描,避免重复 I/O)
             try:
                 if self.var_subfolder.get() and ok_count > 0:
-                    index_path = os.path.join(self.var_dir.get(), INDEX_FILE)
-                    with open(index_path, "w", encoding="utf-8") as f:
-                        f.write(build_index_html(self.var_dir.get()))
+                    root = self.var_dir.get()
+                    articles = scan_saved_articles(root)
+                    with open(os.path.join(root, INDEX_FILE), "w", encoding="utf-8") as f:
+                        f.write(build_index_html(root, articles=articles))
+                    with open(os.path.join(root, DASHBOARD_FILE), "w", encoding="utf-8") as f:
+                        f.write(build_dashboard_html(root, articles=articles))
             except Exception as e:
-                self._log(f"（生成目录索引失败:{e}）")
+                self._log(f"（生成目录/仪表盘失败:{e}）")
 
             self._finish(ok_count == 0)
 
@@ -361,6 +368,16 @@ class App:
                 messagebox.showerror("错误", f"生成目录失败:{e}")
                 return
         open_file(index_path)
+
+    def _open_dashboard(self):
+        path = os.path.join(self.var_dir.get(), DASHBOARD_FILE)
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(build_dashboard_html(self.var_dir.get()))
+        except Exception as e:
+            messagebox.showerror("错误", f"生成仪表盘失败:{e}")
+            return
+        open_file(path)
 
     def _finish(self, error: bool):
         def _do():

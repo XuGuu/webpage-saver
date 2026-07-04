@@ -13,7 +13,8 @@ from save_webpage import (parse_wechat_html, generate_html, pick_url_from_clipbo
                           parse_weibo_html, parse_bili_html,
                           parse_juejin_html, parse_jianshu_html,
                           _build_chrome_pdf_cmd, generate_pdf,
-                          make_default_icon_png, make_default_icon_ico)
+                          make_default_icon_png, make_default_icon_ico,
+                          _read_article_extra_stats, build_dashboard_html)
 
 
 def make_page(content_html: str, title: str = "测试文章") -> str:
@@ -1258,6 +1259,124 @@ class TestDefaultIconIco(unittest.TestCase):
         image_offset = struct.unpack("<I", data[18:22])[0]
         actual = len(data) - image_offset
         self.assertEqual(declared, actual)
+
+
+def _seed_full_article(root, name, author, date, site, body_words, img_count):
+    """在 root 下造一篇完整的 saved 文章(带 site badge、内容字数、图片数量)。"""
+    import os
+    sub = os.path.join(root, name)
+    os.makedirs(sub)
+    open(os.path.join(sub, ".saved-article"), "w").close()
+    body_text = "字" * body_words  # 用中文字构造精确字数
+    imgs = "".join(f'<img src="/x{i}.jpg">' for i in range(img_count))
+    html = f'''<!DOCTYPE html><html><head><title>{name}</title></head>
+<body>
+<h1>{name}</h1>
+<div class="meta">
+  <span class="badge">{site}</span>
+  <span class="author">{author}</span>
+  <span class="date">{date}</span>
+</div>
+<div class="content">
+<p>{body_text}</p>
+{imgs}
+</div>
+</body></html>'''
+    with open(os.path.join(sub, f"{name}.html"), "w", encoding="utf-8") as f:
+        f.write(html)
+
+
+class TestArticleExtraStats(unittest.TestCase):
+    """_read_article_extra_stats 从 HTML 里提取 site/word_count/image_count。"""
+
+    def test_reads_site_from_badge(self):
+        import tempfile, os
+        with tempfile.TemporaryDirectory() as root:
+            _seed_full_article(root, "甲", "A", "2026-01-01", "公众号", 100, 2)
+            html_path = os.path.join(root, "甲", "甲.html")
+            stats = _read_article_extra_stats(html_path)
+            self.assertEqual(stats["site"], "公众号")
+
+    def test_reads_word_count_from_content(self):
+        import tempfile, os
+        with tempfile.TemporaryDirectory() as root:
+            _seed_full_article(root, "乙", "B", "2026-01-02", "B站专栏", 500, 3)
+            stats = _read_article_extra_stats(os.path.join(root, "乙", "乙.html"))
+            # 允许±20 字误差(HTML tag 计算)
+            self.assertGreater(stats["word_count"], 480)
+            self.assertLess(stats["word_count"], 520)
+
+    def test_reads_image_count(self):
+        import tempfile, os
+        with tempfile.TemporaryDirectory() as root:
+            _seed_full_article(root, "丙", "C", "2026-01-03", "掘金", 100, 7)
+            stats = _read_article_extra_stats(os.path.join(root, "丙", "丙.html"))
+            self.assertEqual(stats["image_count"], 7)
+
+
+class TestDashboard(unittest.TestCase):
+    """build_dashboard_html 数据总览页(抓取统计仪表盘)。"""
+
+    def test_empty_dir_shows_placeholder(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as root:
+            html = build_dashboard_html(root)
+            self.assertIn("还没", html)
+
+    def test_shows_total_count(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as root:
+            _seed_full_article(root, "文1", "作者A", "2026-06-01", "公众号", 100, 1)
+            _seed_full_article(root, "文2", "作者A", "2026-06-15", "公众号", 200, 2)
+            _seed_full_article(root, "文3", "作者B", "2026-07-01", "掘金", 300, 0)
+            html = build_dashboard_html(root)
+            self.assertIn("3", html)  # 总篇数
+
+    def test_shows_source_diversity(self):
+        """含 2 个不同的 site 类型时应体现。"""
+        import tempfile
+        with tempfile.TemporaryDirectory() as root:
+            _seed_full_article(root, "文1", "A", "2026-06-01", "公众号", 100, 1)
+            _seed_full_article(root, "文2", "B", "2026-06-15", "掘金", 200, 2)
+            html = build_dashboard_html(root)
+            self.assertIn("公众号", html)
+            self.assertIn("掘金", html)
+
+    def test_uses_conic_gradient_for_type_distribution(self):
+        """网站类型环形图用 CSS conic-gradient。"""
+        import tempfile
+        with tempfile.TemporaryDirectory() as root:
+            _seed_full_article(root, "文1", "A", "2026-06-01", "公众号", 100, 1)
+            _seed_full_article(root, "文2", "B", "2026-06-15", "掘金", 200, 2)
+            html = build_dashboard_html(root)
+            self.assertIn("conic-gradient", html)
+
+    def test_shows_top_author(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as root:
+            # 作者 A 三篇,作者 B 一篇 → A 排前
+            _seed_full_article(root, "文1", "作者A", "2026-06-01", "公众号", 100, 0)
+            _seed_full_article(root, "文2", "作者A", "2026-06-05", "公众号", 100, 0)
+            _seed_full_article(root, "文3", "作者A", "2026-06-10", "公众号", 100, 0)
+            _seed_full_article(root, "文4", "作者B", "2026-06-15", "掘金", 100, 0)
+            html = build_dashboard_html(root)
+            # 作者 A 应先于 作者 B 出现(排行榜按 count 降序)
+            self.assertLess(html.find("作者A"), html.find("作者B"))
+
+    def test_has_heatmap_grid(self):
+        """365 天热力图 grid 存在。"""
+        import tempfile
+        with tempfile.TemporaryDirectory() as root:
+            _seed_full_article(root, "甲", "A", "2026-01-01", "公众号", 100, 1)
+            html = build_dashboard_html(root)
+            self.assertIn("heatmap", html)
+
+    def test_dark_mode_css_present(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as root:
+            _seed_full_article(root, "甲", "A", "2026-01-01", "公众号", 100, 1)
+            html = build_dashboard_html(root)
+            self.assertIn("prefers-color-scheme: dark", html)
 
 
 class TestParseWeibo(unittest.TestCase):

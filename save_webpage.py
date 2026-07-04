@@ -152,10 +152,14 @@ def _build_stats_bar(articles: list) -> str:
     return '<div class="stats-bar">' + "".join(parts) + '</div>'
 
 
-def build_index_html(root_dir: str) -> str:
-    """生成目录索引 HTML(含搜索框、统计条、卡片列表)。"""
+def build_index_html(root_dir: str, articles: list | None = None) -> str:
+    """生成目录索引 HTML(含搜索框、统计条、卡片列表)。
+
+    articles:已扫描的文章列表,若为 None 则内部扫描一次。
+    """
     import html as _h
-    articles = scan_saved_articles(root_dir)
+    if articles is None:
+        articles = scan_saved_articles(root_dir)
     cards = []
     for a in articles:
         rel_href = urllib.parse.quote(f"{a['folder']}/{os.path.basename(a['html_path'])}")
@@ -1688,6 +1692,294 @@ def make_default_icon_png(size: int = 1024) -> bytes:
             + chunk(b'IHDR', ihdr)
             + chunk(b'IDAT', idat)
             + chunk(b'IEND', b''))
+
+
+def _read_article_extra_stats(html_path: str) -> dict:
+    """从保存的 HTML 里补充 site/word_count/image_count(供 dashboard 用)。"""
+    try:
+        with open(html_path, encoding="utf-8") as f:
+            html = f.read()
+    except Exception:
+        return {"site": "", "word_count": 0, "image_count": 0}
+
+    site_m = re.search(r'<span class="badge">([^<]+)</span>', html)
+    site = site_m.group(1).strip() if site_m else ""
+
+    content_m = re.search(r'<div class="content">(.+?)</div>', html, re.DOTALL)
+    if content_m:
+        content_html = content_m.group(1)
+        image_count = len(re.findall(r'<img\b', content_html))
+        text = re.sub(r'<[^>]+>', '', content_html)
+        text = re.sub(r'\s+', '', text)  # 去空白后计字数
+        word_count = len(text)
+    else:
+        image_count = 0
+        word_count = 0
+    return {"site": site, "word_count": word_count, "image_count": image_count}
+
+
+_DASHBOARD_TYPE_COLORS = ["#4a90e2", "#7ed321", "#f5a623", "#bd10e0",
+                          "#50e3c2", "#d0021b", "#9013fe", "#b8e986"]
+
+
+def _build_dashboard_stats(articles: list) -> dict:
+    """从 articles + extra stats 聚合仪表盘所需的所有数据(纯计算,不涉 HTML)。"""
+    from collections import Counter
+    import datetime
+    total = len(articles)
+    authors = Counter()
+    sites = Counter()
+    total_words = 0
+    total_images = 0
+    day_counts = Counter()  # key: 'YYYY-MM-DD'
+    month_counts = Counter()  # key: 'YYYY-MM'
+    for a in articles:
+        if a.get("author"):
+            authors[a["author"]] += 1
+        if a.get("site"):
+            sites[a["site"]] += 1
+        total_words += a.get("word_count", 0)
+        total_images += a.get("image_count", 0)
+        dt = datetime.datetime.fromtimestamp(a["mtime"])
+        day_counts[dt.strftime("%Y-%m-%d")] += 1
+        month_counts[dt.strftime("%Y-%m")] += 1
+
+    return {
+        "total": total,
+        "author_count": len(authors),
+        "site_count": len(sites),
+        "total_words": total_words,
+        "total_images": total_images,
+        "top_authors": authors.most_common(15),
+        "sites": sites.most_common(),
+        "day_counts": dict(day_counts),
+        "month_counts": dict(sorted(month_counts.items())),
+    }
+
+
+def _render_heatmap(day_counts: dict) -> str:
+    """渲染最近 365 天热力图(53 周 × 7 天,列填 grid)。"""
+    import datetime
+    today = datetime.date.today()
+    start = today - datetime.timedelta(days=364)
+    max_v = max(day_counts.values()) if day_counts else 1
+    cells = []
+    for i in range(365):
+        d = start + datetime.timedelta(days=i)
+        key = d.isoformat()
+        v = day_counts.get(key, 0)
+        level = 0 if v == 0 else min(4, 1 + int(v * 3 / max_v))
+        cells.append(f'<div class="cell l{level}" title="{key}: {v} 篇"></div>')
+    return '<div class="heatmap">' + "".join(cells) + '</div>'
+
+
+def build_dashboard_html(root_dir: str, articles: list | None = None) -> str:
+    """生成抓取统计仪表盘 HTML(独立数据总览页)。
+
+    articles:已扫描的文章列表,若为 None 则内部扫描一次。
+    调用方(如 GUI 保存后同时更新 index 和 dashboard)可传入已扫描结果避免重复 I/O。
+    """
+    import html as _h, os as _os
+    base = articles if articles is not None else scan_saved_articles(root_dir)
+    if not base:
+        return _dashboard_empty_html()
+
+    # 补 extra stats
+    articles = []
+    for a in base:
+        extra = _read_article_extra_stats(a["html_path"])
+        articles.append({**a, **extra})
+
+    stats = _build_dashboard_stats(articles)
+    articles_sorted = sorted(articles, key=lambda x: x["mtime"])
+    oldest = articles_sorted[0]
+    newest = articles_sorted[-1]
+    longest = max(articles, key=lambda x: x["word_count"])
+    shortest = min(articles, key=lambda x: x["word_count"])
+    coverage_days = (
+        (int(newest["mtime"]) - int(oldest["mtime"])) // 86400 + 1
+        if len(articles) > 1 else 1)
+
+    # 数字条
+    def _big(n: int, label: str) -> str:
+        return f'<div class="big-stat"><div class="n">{n:,}</div><div class="lbl">{label}</div></div>'
+    big_bar = "".join([
+        _big(stats["total"], "篇文章"),
+        _big(stats["author_count"], "位作者"),
+        _big(stats["site_count"], "个来源"),
+        _big(stats["total_words"], "字"),
+        _big(stats["total_images"], "张图片"),
+        _big(coverage_days, "天覆盖"),
+    ])
+
+    # 月度柱状图
+    month_items = list(stats["month_counts"].items())[-12:]
+    max_m = max((v for _, v in month_items), default=1)
+    month_bars = "".join(
+        f'<div class="mbar"><div class="bar" style="height:{v*160//max_m}px" title="{m}: {v} 篇"></div><div class="mlbl">{m[5:]}</div></div>'
+        for m, v in month_items) or '<div class="muted">还没有数据</div>'
+
+    # 网站类型分布(conic-gradient)
+    total_for_pie = sum(v for _, v in stats["sites"]) or 1
+    stops = []
+    legend = []
+    running = 0.0
+    for i, (name, v) in enumerate(stats["sites"]):
+        color = _DASHBOARD_TYPE_COLORS[i % len(_DASHBOARD_TYPE_COLORS)]
+        pct = v * 100 / total_for_pie
+        stops.append(f'{color} {running:.1f}% {running+pct:.1f}%')
+        running += pct
+        legend.append(
+            f'<div class="lg-row"><span class="dot" style="background:{color}"></span>'
+            f'{_h.escape(name)} <span class="lg-n">{v} ({pct:.0f}%)</span></div>')
+    pie_style = "background: conic-gradient(" + ", ".join(stops) + ");"
+    pie_html = f'<div class="pie" style="{pie_style}"></div><div class="legend">{"".join(legend)}</div>'
+
+    # 来源排行 Top 15
+    max_a = stats["top_authors"][0][1] if stats["top_authors"] else 1
+    rank_rows = "".join(
+        f'<div class="rank-row"><div class="rank-name">{_h.escape(a)}</div>'
+        f'<div class="rank-bar-wrap"><div class="rank-bar" style="width:{n*100//max_a}%"></div></div>'
+        f'<div class="rank-n">{n}</div></div>'
+        for a, n in stats["top_authors"]) or '<div class="muted">还没有数据</div>'
+
+    # 热力图
+    heatmap_html = _render_heatmap(stats["day_counts"])
+
+    # 极值卡片
+    def _extreme(a: dict, label: str, extra_line: str) -> str:
+        href = urllib.parse.quote(
+            _os.path.relpath(a["html_path"], root_dir).replace(_os.sep, "/"))
+        return (f'<a class="ex-card" href="{href}">'
+                f'<div class="ex-lbl">{label}</div>'
+                f'<div class="ex-title">{_h.escape(a["title"])}</div>'
+                f'<div class="ex-extra">{extra_line}</div></a>')
+    extremes = "".join([
+        _extreme(longest, "最长文章", f'{longest["word_count"]:,} 字'),
+        _extreme(shortest, "最短文章", f'{shortest["word_count"]:,} 字'),
+        _extreme(newest, "最新保存",
+                 datetime.datetime.fromtimestamp(newest["mtime"]).strftime("%Y-%m-%d")),
+        _extreme(oldest, "最早保存",
+                 datetime.datetime.fromtimestamp(oldest["mtime"]).strftime("%Y-%m-%d")),
+    ])
+
+    return _dashboard_shell(big_bar, month_bars, pie_html, rank_rows, heatmap_html, extremes)
+
+
+def _dashboard_empty_html() -> str:
+    return '''<!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8">
+<title>我的抓取仪表盘</title>
+<style>
+body { font-family: -apple-system, sans-serif; text-align: center; padding: 80px; color: #666; }
+@media (prefers-color-scheme: dark) { body { background: #1a1a1a; color: #aaa; } }
+</style></head><body>
+<h1>我的抓取仪表盘</h1><p>还没保存过文章。用工具抓几篇后再回来看看吧。</p>
+</body></html>'''
+
+
+def _dashboard_shell(big_bar, month_bars, pie_html, rank_rows, heatmap, extremes) -> str:
+    return f'''<!DOCTYPE html>
+<html lang="zh-CN"><head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>我的抓取仪表盘</title>
+<style>
+:root {{ --bg: #fff; --fg: #1a1a1a; --muted: #888; --panel: #fafafa; --border: #eee;
+         --accent: #4a90e2; --heatmap-bg: #ebedf0; }}
+@media (prefers-color-scheme: dark) {{
+  :root {{ --bg: #1a1a1a; --fg: #eee; --muted: #999; --panel: #222; --border: #333;
+           --accent: #6ba4e8; --heatmap-bg: #2a2a2a; }}
+}}
+body {{ font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif;
+       max-width: 1000px; margin: 40px auto; padding: 20px;
+       background: var(--bg); color: var(--fg); line-height: 1.6; }}
+h1 {{ font-size: 24px; margin-bottom: 4px; }}
+h2 {{ font-size: 15px; color: var(--muted); font-weight: 500; margin: 24px 0 12px; }}
+.big-bar {{ display: grid; grid-template-columns: repeat(6, 1fr); gap: 12px;
+            margin: 20px 0 32px; }}
+.big-stat {{ background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
+            padding: 14px; text-align: center; }}
+.big-stat .n {{ font-size: 22px; font-weight: 600; color: var(--accent); }}
+.big-stat .lbl {{ font-size: 12px; color: var(--muted); }}
+
+.two-col {{ display: grid; grid-template-columns: 2fr 1fr; gap: 20px; margin: 16px 0; }}
+.panel {{ background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
+         padding: 16px; }}
+.months {{ display: flex; align-items: flex-end; height: 200px; gap: 6px; }}
+.mbar {{ flex: 1; display: flex; flex-direction: column; align-items: center; }}
+.mbar .bar {{ width: 100%; background: var(--accent); border-radius: 4px 4px 0 0;
+             transition: opacity 0.2s; }}
+.mbar .bar:hover {{ opacity: 0.7; }}
+.mbar .mlbl {{ font-size: 10px; color: var(--muted); margin-top: 4px; }}
+
+.pie-wrap {{ display: flex; align-items: center; gap: 16px; }}
+.pie {{ width: 100px; height: 100px; border-radius: 50%; flex-shrink: 0; }}
+.legend {{ font-size: 12px; flex: 1; }}
+.lg-row {{ display: flex; align-items: center; margin: 3px 0; }}
+.dot {{ display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 6px; }}
+.lg-n {{ color: var(--muted); margin-left: auto; }}
+
+.rank-row {{ display: grid; grid-template-columns: 140px 1fr 40px; gap: 10px;
+            align-items: center; margin: 6px 0; font-size: 13px; }}
+.rank-name {{ text-overflow: ellipsis; overflow: hidden; white-space: nowrap; }}
+.rank-bar-wrap {{ background: var(--border); border-radius: 3px; height: 12px; }}
+.rank-bar {{ background: var(--accent); height: 100%; border-radius: 3px; }}
+.rank-n {{ color: var(--muted); text-align: right; }}
+
+.heatmap {{ display: grid; grid-auto-flow: column; grid-template-rows: repeat(7, 12px);
+           grid-auto-columns: 12px; gap: 3px; padding: 8px 0; }}
+.heatmap .cell {{ background: var(--heatmap-bg); border-radius: 2px; }}
+.heatmap .l1 {{ background: #c6e48b; }}
+.heatmap .l2 {{ background: #7bc96f; }}
+.heatmap .l3 {{ background: #239a3b; }}
+.heatmap .l4 {{ background: #196127; }}
+@media (prefers-color-scheme: dark) {{
+  .heatmap .l1 {{ background: #0e4429; }}
+  .heatmap .l2 {{ background: #006d32; }}
+  .heatmap .l3 {{ background: #26a641; }}
+  .heatmap .l4 {{ background: #39d353; }}
+}}
+
+.extremes {{ display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin: 16px 0; }}
+.ex-card {{ background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
+           padding: 12px; text-decoration: none; color: inherit; transition: background 0.15s; }}
+.ex-card:hover {{ background: var(--border); }}
+.ex-lbl {{ font-size: 11px; color: var(--muted); }}
+.ex-title {{ font-size: 13px; font-weight: 500; margin: 4px 0;
+             overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }}
+.ex-extra {{ font-size: 11px; color: var(--muted); }}
+
+.muted {{ color: var(--muted); font-size: 12px; }}
+</style>
+</head><body>
+<h1>我的抓取仪表盘</h1>
+<div class="big-bar">{big_bar}</div>
+
+<div class="two-col">
+  <div class="panel">
+    <h2>月度趋势(近 12 个月)</h2>
+    <div class="months">{month_bars}</div>
+  </div>
+  <div class="panel">
+    <h2>网站类型分布</h2>
+    <div class="pie-wrap">{pie_html}</div>
+  </div>
+</div>
+
+<div class="panel">
+  <h2>作者排行 Top 15</h2>
+  {rank_rows}
+</div>
+
+<div class="panel">
+  <h2>365 天保存热力图</h2>
+  {heatmap}
+</div>
+
+<h2>极值文章</h2>
+<div class="extremes">{extremes}</div>
+
+</body></html>'''
 
 
 def make_default_icon_ico(size: int = 256) -> bytes:
