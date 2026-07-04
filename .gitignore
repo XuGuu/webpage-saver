@@ -4,6 +4,7 @@ config.json
 # Python 缓存
 __pycache__/
 *.pyc
+.pytest_cache/
 
 # 系统文件
 .DS_Store
