@@ -82,3 +82,14 @@
 ## 明确不做(YAGNI)
 
 阅读量、评论区、多合并单元格精细渲染、下划线用 markdown 扩展语法 `__…__`(和加粗冲突)、字号→标题级别自动映射。
+
+## 评审后修正(2026-07-05 code review)
+
+- `datetime.utcfromtimestamp` 换成 `datetime.fromtimestamp(tz=UTC+8)`(Python 3.12+ 前者已废弃)
+- 图片下载 4xx/5xx 不再重试,只重试连接类异常
+- `_render_list` 里 li 混合"文字+strong/em/code"的加粗不再丢失(改用 sub_list.extract() 后统一走 `_inline_md`)
+- HTML 里 `<table>` 加入 block-in-p unwrap 列表,不再嵌在 `<p>` 中
+- 斜体正则加"非字/非星"两侧边界,不再误吞 `2*3` 这类乘号
+- 表格 cell 里 `\|` 生成 HTML 时还原为 `|`
+- `generate_markdown` 添加"发布于 X · 公众号:Y" 头部(补齐设计承诺)
+- 假标题判定仅对 `<section>`,`<p>` 里的 `<strong>` 保持行内加粗语义(修正 §4 描述)

@@ -424,5 +424,271 @@ class TestInlineCodeWithBacktick(unittest.TestCase):
         self.assertNotIn("<code></code>", html)
 
 
+class TestMetadata(unittest.TestCase):
+    """公众号元数据抽取(内容质量 #1)。"""
+
+    def test_publish_date_from_ct(self):
+        """从 var ct = "时间戳" 抽取发布日期。"""
+        html = f'''<!DOCTYPE html><html><head><title>T</title></head><body>
+<h1 id="activity-name">T</h1>
+<div id="js_content"><p>正文</p></div>
+<script>var ct = "1782462134";</script>
+</body></html>'''
+        data = parse_wechat_html(html)
+        # 1782462134 = 2026-06-25 (UTC+8),允许 25/26 都算过
+        self.assertRegex(data.get("date", ""), r"^2026-06-2[456]$")
+
+    def test_no_date_when_missing(self):
+        data = parse_wechat_html(make_page("<p>正文</p>"))
+        self.assertEqual(data.get("date", ""), "")
+
+
+class TestTables(unittest.TestCase):
+    """表格保留(内容质量 #2)。"""
+
+    def test_simple_table_to_markdown(self):
+        data = parse_wechat_html(make_page(
+            "<table><tr><th>姓名</th><th>年龄</th></tr>"
+            "<tr><td>张三</td><td>25</td></tr>"
+            "<tr><td>李四</td><td>30</td></tr></table>"))
+        md = data["markdown"]
+        self.assertIn("| 姓名 | 年龄 |", md)
+        self.assertIn("| --- | --- |", md)
+        self.assertIn("| 张三 | 25 |", md)
+        self.assertIn("| 李四 | 30 |", md)
+
+    def test_table_first_row_as_header_when_no_th(self):
+        data = parse_wechat_html(make_page(
+            "<table><tr><td>甲</td><td>乙</td></tr>"
+            "<tr><td>丙</td><td>丁</td></tr></table>"))
+        md = data["markdown"]
+        self.assertIn("| 甲 | 乙 |", md)
+        self.assertIn("| --- | --- |", md)
+        self.assertIn("| 丙 | 丁 |", md)
+
+    def test_table_html_rendering(self):
+        html = generate_html(
+            {"title": "T", "author": "", "site": "", "images": [],
+             "markdown": "| a | b |\n| --- | --- |\n| c | d |"},
+            [], "")
+        self.assertIn("<table>", html)
+        self.assertIn("<th>a</th>", html)
+        self.assertIn("<td>c</td>", html)
+
+
+class TestImageRetry(unittest.TestCase):
+    """图片下载失败重试(内容质量 #3)。"""
+
+    def test_retries_on_network_error(self):
+        """前 2 次失败,第 3 次成功。"""
+        import tempfile
+        from unittest.mock import patch
+        import requests as req
+        from save_webpage import download_image
+
+        call_count = [0]
+
+        def fake_get(url, **kwargs):
+            call_count[0] += 1
+            if call_count[0] < 3:
+                raise req.ConnectionError("模拟网络错误")
+            class R:
+                content = b"fake image bytes"
+                status_code = 200
+                def raise_for_status(self): pass
+            return R()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch("save_webpage.requests.get", side_effect=fake_get), \
+                 patch("save_webpage.time.sleep"):  # 加速测试
+                result = download_image("https://example.com/x.jpg", tmp, 0)
+
+        self.assertEqual(call_count[0], 3)
+        self.assertEqual(result, "img_0.jpg")
+
+    def test_gives_up_after_max_retries(self):
+        """连续失败达上限,返回 None。"""
+        import tempfile
+        from unittest.mock import patch
+        import requests as req
+        from save_webpage import download_image
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch("save_webpage.requests.get",
+                       side_effect=req.ConnectionError("总是失败")), \
+                 patch("save_webpage.time.sleep"):
+                result = download_image("https://example.com/x.jpg", tmp, 0)
+        self.assertIsNone(result)
+
+
+class TestFakeHeading(unittest.TestCase):
+    """样式冒充的伪标题识别(内容质量 #4)。"""
+
+    def test_bold_short_section_becomes_h3(self):
+        """短加粗的 section → 作为三级标题。"""
+        data = parse_wechat_html(make_page(
+            '<section><strong>章节小标题</strong></section>'
+            '<p>正文段落</p>'))
+        self.assertIn("### 章节小标题", data["markdown"])
+
+    def test_font_weight_style_becomes_h3(self):
+        data = parse_wechat_html(make_page(
+            '<section style="font-weight: 700;">另一小标题</section>'
+            '<p>正文</p>'))
+        self.assertIn("### 另一小标题", data["markdown"])
+
+    def test_long_bold_paragraph_not_treated_as_heading(self):
+        """长文本即使加粗也不当标题,避免误判。"""
+        long = "这是一段很长的加粗段落," * 5  # >40 字
+        data = parse_wechat_html(make_page(f"<section><strong>{long}</strong></section>"))
+        md = data["markdown"]
+        self.assertNotIn(f"### {long}", md)
+        self.assertIn(long, md)  # 但内容要保留
+
+
+class TestEmphasisStrikeUnderline(unittest.TestCase):
+    """斜体、删除线、下划线保留(内容质量 #5)。"""
+
+    def test_em_becomes_italic(self):
+        data = parse_wechat_html(make_page("<p>前<em>斜体文字</em>后</p>"))
+        self.assertIn("*斜体文字*", data["markdown"])
+
+    def test_i_tag_also_italic(self):
+        data = parse_wechat_html(make_page("<p>前<i>斜体</i>后</p>"))
+        self.assertIn("*斜体*", data["markdown"])
+
+    def test_del_becomes_strikethrough(self):
+        data = parse_wechat_html(make_page("<p>前<del>删除的字</del>后</p>"))
+        self.assertIn("~~删除的字~~", data["markdown"])
+
+    def test_underline_survives_to_html(self):
+        """下划线用 <u> 直通,最终 HTML 里保留 <u> 标签。"""
+        data = parse_wechat_html(make_page("<p>前<u>下划线</u>后</p>"))
+        html = generate_html(data, [], "")
+        self.assertIn("<u>下划线</u>", html)
+
+    def test_italic_html_conversion(self):
+        html = generate_html(
+            {"title": "T", "author": "", "site": "", "images": [],
+             "markdown": "前 *斜体* 后"}, [], "")
+        self.assertIn("<em>斜体</em>", html)
+
+    def test_strike_html_conversion(self):
+        html = generate_html(
+            {"title": "T", "author": "", "site": "", "images": [],
+             "markdown": "前 ~~删除线~~ 后"}, [], "")
+        self.assertIn("<del>删除线</del>", html)
+
+
+class TestNestedList(unittest.TestCase):
+    """嵌套列表(内容质量 #6)。"""
+
+    def test_two_level_unordered(self):
+        data = parse_wechat_html(make_page(
+            "<ul><li>一级甲<ul><li>二级甲</li><li>二级乙</li></ul></li>"
+            "<li>一级乙</li></ul>"))
+        md = data["markdown"]
+        self.assertIn("- 一级甲", md)
+        self.assertIn("  - 二级甲", md)
+        self.assertIn("  - 二级乙", md)
+        self.assertIn("- 一级乙", md)
+
+    def test_indented_list_in_html(self):
+        html = generate_html(
+            {"title": "T", "author": "", "site": "", "images": [],
+             "markdown": "- 一\n  - 一点一\n  - 一点二\n- 二"}, [], "")
+        # 嵌套要形成嵌套 <ul>
+        self.assertIn("<ul>", html)
+        # 二级子列表出现在一级 <li> 里
+        self.assertRegex(html, r"<li>一<ul>.*?一点一.*?一点二.*?</ul></li>")
+
+    def test_li_with_mixed_text_and_strong_preserves_bold(self):
+        """<li>Prefix <strong>bold</strong> suffix</li> 里的加粗不能丢(评审确认)。"""
+        data = parse_wechat_html(make_page(
+            "<ul><li>Prefix <strong>bold</strong> suffix</li></ul>"))
+        self.assertIn("**bold**", data["markdown"])
+
+
+class TestReviewFixes(unittest.TestCase):
+    """本轮 code-review 确认项集中回归测试。"""
+
+    def _html_for(self, md: str, **extra) -> str:
+        data = {"title": "T", "author": "", "site": "", "images": [], "markdown": md}
+        data.update(extra)
+        return generate_html(data, [], "")
+
+    def test_table_not_wrapped_in_p(self):
+        """<table> 不能嵌在 <p> 里(评审 E)。"""
+        html = self._html_for("text\n\n| a | b |\n| --- | --- |\n| c | d |\n\nmore")
+        self.assertNotIn("<p><table>", html)
+        self.assertIn("<table>", html)
+
+    def test_italic_regex_ignores_math_asterisks(self):
+        """math: 2*3 = 6 and 4*5=20 不应被识别为斜体(评审 A/D)。"""
+        html = self._html_for("math: 2*3 = 6 and 4*5=20")
+        self.assertNotIn("<em>", html)
+
+    def test_italic_regex_still_matches_normal_italic(self):
+        """*正常斜体* 仍然生效。"""
+        html = self._html_for("前 *正常斜体* 后")
+        self.assertIn("<em>正常斜体</em>", html)
+
+    def test_table_cell_pipe_unescaped(self):
+        """含 | 的 cell (\\|) 要还原为 |(评审 A)。"""
+        data = parse_wechat_html(make_page(
+            "<table><tr><th>头</th><th>值</th></tr>"
+            "<tr><td>a|b</td><td>c</td></tr></table>"))
+        html = generate_html(data, [], "")
+        # HTML 里 cell 应显示 'a|b' 完整一格,不是被切成两格
+        self.assertIn("<td>a|b</td>", html)
+        self.assertNotIn("<td>a\\</td>", html)
+
+    def test_markdown_has_publish_header(self):
+        """Markdown 开头有'发布于 X · 公众号:Y'(设计承诺,评审 C/I/J)。"""
+        from save_webpage import generate_markdown
+        data = {"title": "T", "author": "烨笙总Yes", "date": "2026-06-26",
+                "site": "公众号", "markdown": "正文段落"}
+        md = generate_markdown(data, [], "")
+        self.assertIn("2026-06-26", md)
+        self.assertIn("烨笙总Yes", md)
+
+    def test_download_image_does_not_retry_on_404(self):
+        """4xx 不重试(评审 B/C)。"""
+        import tempfile
+        from unittest.mock import patch
+        from save_webpage import download_image
+
+        call_count = [0]
+
+        class R404:
+            status_code = 404
+            def raise_for_status(self):
+                import requests
+                raise requests.HTTPError("404")
+
+        def fake_get(url, **kwargs):
+            call_count[0] += 1
+            return R404()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch("save_webpage.requests.get", side_effect=fake_get), \
+                 patch("save_webpage.time.sleep"):
+                result = download_image("https://example.com/x.jpg", tmp, 0)
+        self.assertIsNone(result)
+        self.assertEqual(call_count[0], 1)  # 只调用 1 次,不重试
+
+    def test_utcfromtimestamp_no_deprecation_warning(self):
+        """时间戳解析不应触发 DeprecationWarning(评审 D)。"""
+        import warnings
+        html = f'''<!DOCTYPE html><html><head><title>T</title></head><body>
+<h1 id="activity-name">T</h1>
+<div id="js_content"><p>正文</p></div>
+<script>var ct = "1782462134";</script></body></html>'''
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", DeprecationWarning)
+            data = parse_wechat_html(html)  # 不应抛出
+        self.assertRegex(data.get("date", ""), r"^2026-06-2[456]$")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

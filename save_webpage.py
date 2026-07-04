@@ -11,6 +11,7 @@
 """
 
 import argparse
+import datetime
 import hashlib
 import json
 import os
@@ -19,6 +20,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 import urllib.parse
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -91,28 +93,37 @@ def detect_site(url: str) -> str:
 # ==================== 图片下载 ====================
 
 def download_image(url: str, save_dir: str, idx: int, referer: str = "") -> str | None:
-    """下载单张图片，返回本地文件名。"""
-    try:
-        ext = ".jpg"
-        parsed = urllib.parse.urlparse(url)
-        path_ext = os.path.splitext(parsed.path)[1].lower()
-        if path_ext in (".png", ".gif", ".webp", ".jpeg", ".jpg"):
-            ext = path_ext
+    """下载单张图片，返回本地文件名。网络异常最多重试 2 次（共 3 次）。"""
+    ext = ".jpg"
+    parsed = urllib.parse.urlparse(url)
+    path_ext = os.path.splitext(parsed.path)[1].lower()
+    if path_ext in (".png", ".gif", ".webp", ".jpeg", ".jpg"):
+        ext = path_ext
 
-        fname = f"img_{idx}{ext}"
-        headers = {**HEADERS}
-        if referer:
-            headers["Referer"] = referer
-        # CSDN 图片需要 Referer 头
-        elif "csdn" in url or "alicdn" in url:
-            headers["Referer"] = "https://blog.csdn.net/"
-        r = requests.get(url, headers=headers, timeout=15)
-        r.raise_for_status()
-        with open(os.path.join(save_dir, fname), "wb") as f:
-            f.write(r.content)
-        return fname
-    except Exception:
-        return None
+    fname = f"img_{idx}{ext}"
+    headers = {**HEADERS}
+    if referer:
+        headers["Referer"] = referer
+    elif "csdn" in url or "alicdn" in url:
+        headers["Referer"] = "https://blog.csdn.net/"
+
+    for attempt in range(3):
+        try:
+            r = requests.get(url, headers=headers, timeout=15)
+            if r.status_code >= 400:
+                return None  # 4xx/5xx 直接放弃,不重试
+            with open(os.path.join(save_dir, fname), "wb") as f:
+                f.write(r.content)
+            return fname
+        except requests.RequestException:
+            # 只在连接/超时等网络类异常重试
+            if attempt < 2:
+                time.sleep(2 ** attempt)
+                continue
+            return None
+        except Exception:
+            return None
+    return None
 
 
 def download_images(urls: list[str], save_dir: str, referer: str = "") -> list[str | None]:
@@ -130,7 +141,7 @@ def download_images(urls: list[str], save_dir: str, referer: str = "") -> list[s
 # ==================== 提取器：公众号 ====================
 
 _HEADING_TAGS = ("h1", "h2", "h3", "h4", "h5", "h6")
-_STRUCTURE_TAGS = _HEADING_TAGS + ("ul", "ol", "blockquote", "pre")
+_STRUCTURE_TAGS = _HEADING_TAGS + ("ul", "ol", "blockquote", "pre", "table")
 
 
 def _inline_md(el) -> str:
@@ -156,6 +167,21 @@ def _inline_md(el) -> str:
                 parts.append(inner)  # 嵌套加粗（strong 套 b）不重复包
             else:
                 parts.append(f"**{inner}**")
+        elif child.name in ("em", "i"):
+            inner = _inline_md(child).strip()
+            if inner and not (inner.startswith("*") and inner.endswith("*")):
+                parts.append(f"*{inner}*")
+            elif inner:
+                parts.append(inner)
+        elif child.name in ("del", "s", "strike"):
+            inner = _inline_md(child).strip()
+            if inner:
+                parts.append(f"~~{inner}~~")
+        elif child.name == "u":
+            inner = _inline_md(child).strip()
+            if inner:
+                # markdown 无原生下划线，用 HTML 标签直通（generate_html 会保护）
+                parts.append(f"<u>{inner}</u>")
         elif child.name == "code":
             inner = child.get_text().strip()
             if inner:
@@ -175,6 +201,64 @@ def _inline_md(el) -> str:
         else:
             parts.append(_inline_md(child))
     return "".join(parts)
+
+
+def _render_list(list_el, depth: int) -> list:
+    """渲染 ul/ol，子列表递归缩进（每层 2 空格）。"""
+    lines = []
+    indent = "  " * depth
+    for i, li in enumerate(list_el.find_all("li", recursive=False), 1):
+        # 先把子 ul/ol 摘出去，避免它们被当作 li 文本一起渲染
+        sub_lists = []
+        for sub in li.find_all(["ul", "ol"], recursive=False):
+            sub_lists.append(sub.extract())
+        # 剩下的整个 li 交给 _inline_md 处理,保留内嵌 strong/em/code 等格式
+        text = _inline_md(li).strip()
+        prefix = "- " if list_el.name == "ul" else f"{i}. "
+        if text:
+            lines.append(indent + prefix + text)
+        elif sub_lists:
+            # li 只含子列表、无文字时,仍保留空的父层标记以维持嵌套结构
+            lines.append(indent + prefix)
+        for sub in sub_lists:
+            lines.extend(_render_list(sub, depth + 1))
+    return lines
+
+
+def _is_fake_heading(el) -> bool:
+    """判断 <section>/<p> 是不是靠样式冒充的伪标题。保守:短 + 加粗 + 无裸文字/其他子标签。"""
+    from bs4 import NavigableString
+
+    # 只判定 <section>：<p> 里的 <strong> 是行内加粗，不是标题
+    if el.name != "section":
+        return False
+    if el.find(["img", *_STRUCTURE_TAGS, "a", "code", "em", "i", "u", "del", "s"]):
+        return False
+    text = el.get_text(strip=True)
+    if not text or len(text) >= 40:
+        return False
+
+    bare_text = 0
+    tag_children = []
+    for c in el.children:
+        if isinstance(c, NavigableString):
+            if str(c).strip():
+                bare_text += 1
+        elif getattr(c, "name", None):
+            tag_children.append(c)
+
+    # 条件 A：整个元素就是一个 <strong>/<b>，其他什么都没有
+    if bare_text == 0 and len(tag_children) == 1 and tag_children[0].name in ("strong", "b"):
+        return True
+    # 条件 B：style 里 font-weight: bold/>=600,且元素结构简单（无子标签或只一个）
+    style = (el.get("style") or "").lower()
+    m = re.search(r'font-weight\s*:\s*(\w+)', style)
+    if m:
+        val = m.group(1)
+        if (val in ("bold", "bolder") or (val.isdigit() and int(val) >= 600)) \
+                and len(tag_children) <= 1:
+            return True
+    return False
 
 
 def _collect_wechat_content(el, md_parts: list, img_urls: list):
@@ -208,15 +292,33 @@ def _collect_wechat_content(el, md_parts: list, img_urls: list):
             if text:
                 level = min(int(child.name[1]), 4)
                 md_parts.append("#" * level + " " + text)
+        elif _is_fake_heading(child):
+            # 样式冒充的伪标题（短 + 加粗）→ 三级标题
+            text = child.get_text(strip=True)
+            if text:
+                md_parts.append("### " + text)
         elif child.name in ("ul", "ol") and child.find("img") is None:
-            # 列表：每个直接子条目一行
-            items = []
-            for i, li in enumerate(child.find_all("li", recursive=False), 1):
-                t = _inline_md(li).strip()
-                if t:
-                    items.append(f"- {t}" if child.name == "ul" else f"{i}. {t}")
-            if items:
-                md_parts.append("\n".join(items))
+            # 列表：每个直接子条目一行，子列表加 2 空格缩进
+            lines = _render_list(child, depth=0)
+            if lines:
+                md_parts.append("\n".join(lines))
+        elif child.name == "table" and child.find("img") is None:
+            # 表格：首行当表头
+            rows = []
+            for tr in child.find_all("tr"):
+                cells = [_inline_md(c).strip().replace("|", "\\|")
+                         for c in tr.find_all(["th", "td"])]
+                if cells:
+                    rows.append(cells)
+            if rows:
+                width = max(len(r) for r in rows)
+                header = rows[0] + [""] * (width - len(rows[0]))
+                lines = ["| " + " | ".join(header) + " |",
+                         "| " + " | ".join(["---"] * width) + " |"]
+                for r in rows[1:]:
+                    r = r + [""] * (width - len(r))
+                    lines.append("| " + " | ".join(r) + " |")
+                md_parts.append("\n".join(lines))
         elif child.name == "blockquote" and child.find("img") is None:
             # 引用块：每行加 > 前缀
             text = _inline_md(child).strip()
@@ -259,6 +361,18 @@ def parse_wechat_html(html: str, url: str = "") -> dict:
     author_m = re.search(r'id="js_name"[^>]*>(.*?)<', html, re.DOTALL)
     author = author_m.group(1).strip() if author_m else ""
 
+    # 发布日期：公众号 2026 起把 publish_time 从 DOM 里去掉，改从 var ct 时间戳取
+    date = ""
+    ct_m = re.search(r'var\s+ct\s*=\s*"(\d+)"', html)
+    if ct_m:
+        try:
+            ts = int(ct_m.group(1))
+            # 公众号服务器在北京时区(UTC+8)
+            tz = datetime.timezone(datetime.timedelta(hours=8))
+            date = datetime.datetime.fromtimestamp(ts, tz=tz).strftime("%Y-%m-%d")
+        except (ValueError, OSError):
+            pass
+
     # 正文：从 HTML 中提取，保留图片位置
     content = soup.find("div", id="js_content")
     img_urls = []
@@ -276,7 +390,8 @@ def parse_wechat_html(html: str, url: str = "") -> dict:
             if src and "mmbiz" in src and not src.startswith("data:"):
                 img_urls.append(src)
 
-    return {"title": title, "author": author, "markdown": md, "images": img_urls, "site": "公众号"}
+    return {"title": title, "author": author, "date": date, "markdown": md,
+            "images": img_urls, "site": "公众号"}
 
 
 def extract_wechat(url: str) -> dict:
@@ -688,6 +803,15 @@ def generate_html(data: dict, img_files: list[str | None], img_dir: str, embed_i
 
     html_body = re.sub(r'```\n?(.*?)\n?```', _stash_code, html_body, flags=re.DOTALL)
 
+    # 允许列表标签直通：把 <u>…</u> 先保护成占位符，转义后再放回
+    inline_html: list[str] = []
+
+    def _stash_inline(m):
+        inline_html.append(m.group(0))
+        return f"\uE010UTAG{len(inline_html) - 1}\uE011"
+
+    html_body = re.sub(r'</?u>', _stash_inline, html_body)
+
     # XSS 防护：转义 markdown 里的裸文本 HTML 元字符（<script> 之类不能直通到输出）
     # 代码块已被占位符替换，转义不影响；后续 markdown 语法自己生成的 <h1><strong> 等标签
     # 是硬编码字面串，此后不会再被转义
@@ -697,16 +821,64 @@ def generate_html(data: dict, img_files: list[str | None], img_dir: str, embed_i
     html_body = re.sub(r'^### (.+)$', r'<h3>\1</h3>', html_body, flags=re.MULTILINE)
     html_body = re.sub(r'^## (.+)$', r'<h2>\1</h2>', html_body, flags=re.MULTILINE)
     html_body = re.sub(r'^# (.+)$', r'<h1>\1</h1>', html_body, flags=re.MULTILINE)
-    # 列表：连续的 "- " / "n. " 行转为 <ul>/<ol>
+    # 列表：连续的 "- " 或 "n. " 行(允许 2 空格缩进的嵌套)转为 <ul>/<ol>
+    def _render_md_list(lines: list, base_indent: int, ordered: bool) -> str:
+        """把嵌套缩进的 markdown 列表转成嵌套 <ul>/<ol>。"""
+        tag = "ol" if ordered else "ul"
+        html = f"<{tag}>"
+        i = 0
+        while i < len(lines):
+            ln = lines[i]
+            m = re.match(r'( *)(-|\d+\.) +(.*)', ln)
+            if not m or len(m.group(1)) != base_indent:
+                break
+            content = m.group(3)
+            # 找同一 <li> 的嵌套子列表(缩进更深的连续行)
+            sub = []
+            j = i + 1
+            while j < len(lines):
+                nested = re.match(r'( *)(-|\d+\.) +', lines[j])
+                if not nested or len(nested.group(1)) <= base_indent:
+                    break
+                sub.append(lines[j])
+                j += 1
+            html += f"<li>{content}"
+            if sub:
+                sub_indent = len(re.match(r'( *)', sub[0]).group(1))
+                sub_ordered = bool(re.match(r' *\d+\. ', sub[0]))
+                html += _render_md_list(sub, sub_indent, sub_ordered)
+            html += "</li>"
+            i = j
+        html += f"</{tag}>"
+        return html
+
+    def _list_block_sub(m):
+        block = m.group(1).strip()
+        lines = block.splitlines()
+        ordered = bool(re.match(r'\d+\.', lines[0]))
+        return _render_md_list(lines, 0, ordered) + "\n"
+
     html_body = re.sub(
-        r'((?:^- .+(?:\n|$))+)',
-        lambda m: "<ul>" + "".join(
-            f"<li>{ln[2:]}</li>" for ln in m.group(1).strip().splitlines()) + "</ul>\n",
-        html_body, flags=re.MULTILINE)
+        r'((?:^(?: *(?:-|\d+\.) +).+(?:\n|$))+)',
+        _list_block_sub, html_body, flags=re.MULTILINE)
+    # 表格：连续的 "| … |" 行转为 <table>；分隔行 "| --- | … |" 之前的是表头
+    def _table_sub(m):
+        rows = [ln.strip() for ln in m.group(1).strip().splitlines()]
+        def cells_of(ln):
+            # 用负向前瞻切分 '|',跳过被 '\' 转义的 '\|',然后把 '\|' 还原为 '|'
+            parts = re.split(r'(?<!\\)\|', ln.strip('|'))
+            return [c.strip().replace('\\|', '|') for c in parts]
+        head = cells_of(rows[0])
+        body_rows = [cells_of(r) for r in rows[2:]]
+        thead = "<thead><tr>" + "".join(f"<th>{c}</th>" for c in head) + "</tr></thead>"
+        tbody = "<tbody>" + "".join(
+            "<tr>" + "".join(f"<td>{c}</td>" for c in r) + "</tr>"
+            for r in body_rows) + "</tbody>"
+        return f"<table>{thead}{tbody}</table>\n"
     html_body = re.sub(
-        r'((?:^\d+\. .+(?:\n|$))+)',
-        lambda m: "<ol>" + "".join(
-            f"<li>{ln.split('. ', 1)[-1]}</li>" for ln in m.group(1).strip().splitlines()) + "</ol>\n",
+        r'((?:^\|.+\|(?:\n|$))+)',
+        lambda m: _table_sub(m) if '| --- |' in m.group(0) or '|---|' in m.group(0)
+                                    or '| ---' in m.group(0) else m.group(0),
         html_body, flags=re.MULTILINE)
     # 引用块：连续的 "> " 行转为 <blockquote>（此时 > 已被转义为 &gt;）
     html_body = re.sub(
@@ -715,6 +887,9 @@ def generate_html(data: dict, img_files: list[str | None], img_dir: str, embed_i
             ln[5:] for ln in m.group(1).strip().splitlines()) + "</blockquote>\n",
         html_body, flags=re.MULTILINE)
     html_body = re.sub(r'\*\*(.+?)\*\*', r'<strong>\1</strong>', html_body)
+    # 斜体、删除线（在 ** 之后，避免 * 被误当成一半的 **;两侧要非字/非星，避免误吞乘号）
+    html_body = re.sub(r'(?<![\*\w])\*([^\*\n]+?)\*(?![\*\w])', r'<em>\1</em>', html_body)
+    html_body = re.sub(r'~~(.+?)~~', r'<del>\1</del>', html_body)
     # 行内代码：先双反引号（可含单反引号），再单反引号
     html_body = re.sub(r'``\s?(.+?)\s?``', r'<code>\1</code>', html_body)
     html_body = re.sub(r'`([^`]+)`', r'<code>\1</code>', html_body)
@@ -724,9 +899,9 @@ def generate_html(data: dict, img_files: list[str | None], img_dir: str, embed_i
     html_body = f"<p>{html_body}</p>"
     html_body = html_body.replace('\n', '<br>')
     # 块级元素不该包在 <p> 里：清理块后多余的 <br>，再把 <p> 解包
-    html_body = re.sub(r'(</(?:h[1-4]|ul|ol|blockquote)>)<br>', r'\1', html_body)
+    html_body = re.sub(r'(</(?:h[1-4]|ul|ol|blockquote|table)>)<br>', r'\1', html_body)
     html_body = re.sub(
-        r'<p>((?:<(?:h[1-4]|ul|ol|blockquote)[^>]*>.*?</(?:h[1-4]|ul|ol|blockquote)>)+)</p>',
+        r'<p>((?:<(?:h[1-4]|ul|ol|blockquote|table)[^>]*>.*?</(?:h[1-4]|ul|ol|blockquote|table)>)+)</p>',
         r'\1', html_body)
 
     # 放回代码块（HTML 转义 & < >）
@@ -739,9 +914,14 @@ def generate_html(data: dict, img_files: list[str | None], img_dir: str, embed_i
     # 代码块外面被段落包装的空 <p> 清理
     html_body = re.sub(r'<p>(<pre><code>.*?</code></pre>)</p>', r'\1',
                        html_body, flags=re.DOTALL)
+    # 放回被保护的 <u> 标签
+    html_body = re.sub(
+        r'UTAG(\d+)',
+        lambda m: inline_html[int(m.group(1))], html_body)
 
     site_badge = f'<span class="badge">{site}</span>' if site else ""
     author_line = f'<span class="author">{author}</span>' if author else ""
+    date_line = f'<span class="date">{data.get("date", "")}</span>' if data.get("date") else ""
 
     return f'''<!DOCTYPE html>
 <html lang="zh-CN">
@@ -763,6 +943,13 @@ h4 {{ font-size: 15px; margin: 16px 0 8px; color: #555; }}
 .content li {{ margin: 6px 0; }}
 .content blockquote {{ border-left: 3px solid #ddd; margin: 12px 0; padding: 2px 16px;
                        color: #666; background: #fafafa; border-radius: 0 6px 6px 0; }}
+.content table {{ border-collapse: collapse; margin: 16px 0; width: 100%; font-size: 14px; }}
+.content th, .content td {{ border: 1px solid #e0e0e0; padding: 8px 12px; text-align: left; }}
+.content th {{ background: #f6f8fa; font-weight: 600; }}
+.content tbody tr:nth-child(even) {{ background: #fafbfc; }}
+.content u {{ text-decoration: underline; }}
+.content em {{ font-style: italic; }}
+.content del {{ text-decoration: line-through; color: #999; }}
 .meta {{ color: #999; font-size: 13px; margin-bottom: 20px; padding-bottom: 16px; border-bottom: 1px solid #f0f0f0; }}
 .meta span {{ margin-right: 12px; }}
 .badge {{ background: #f0f0f0; padding: 2px 8px; border-radius: 4px; font-size: 12px; }}
@@ -779,7 +966,7 @@ h4 {{ font-size: 15px; margin: 16px 0 8px; color: #555; }}
 <body>
 <h1>{title}</h1>
 <div class="meta">
-  {site_badge} {author_line}
+  {site_badge} {author_line} {date_line}
 </div>
 <div class="content">
 {html_body}
@@ -792,6 +979,19 @@ h4 {{ font-size: 15px; margin: 16px 0 8px; color: #555; }}
 def generate_markdown(data: dict, img_files: list[str | None], img_dir_name: str) -> str:
     """生成给 LLM 用的 Markdown。"""
     md = data["markdown"]
+
+    # 元数据头:发布日期 + 作者/公众号
+    date = data.get("date", "")
+    author = data.get("author", "")
+    site = data.get("site", "")
+    meta_bits = []
+    if date:
+        meta_bits.append(f"发布于 {date}")
+    if author:
+        label = f"{site}:{author}" if site else author
+        meta_bits.append(label)
+    if meta_bits:
+        md = "> " + " · ".join(meta_bits) + "\n\n" + md
 
     if not img_dir_name:
         # 图片未保留，移除 markdown 中的图片标记
