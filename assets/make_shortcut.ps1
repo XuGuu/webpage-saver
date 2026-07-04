@@ -12,7 +12,7 @@ $lnk = $shell.CreateShortcut($lnkPath)
 $lnk.TargetPath = 'pythonw.exe'
 $lnk.Arguments = '"' + (Join-Path $ProjectDir 'gui.py') + '"'
 $lnk.WorkingDirectory = $ProjectDir
-$lnk.IconLocation = Join-Path $ProjectDir 'assets\icon.ico'
+$lnk.IconLocation = Join-Path (Join-Path $ProjectDir 'assets') 'icon.ico'
 $lnk.Description = '把公众号、B 站、掘金等文章保存为 HTML+Markdown'
 $lnk.Save()
 
