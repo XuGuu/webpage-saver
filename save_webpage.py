@@ -1725,7 +1725,6 @@ _DASHBOARD_TYPE_COLORS = ["#4a90e2", "#7ed321", "#f5a623", "#bd10e0",
 def _build_dashboard_stats(articles: list) -> dict:
     """从 articles + extra stats 聚合仪表盘所需的所有数据(纯计算,不涉 HTML)。"""
     from collections import Counter
-    import datetime
     total = len(articles)
     authors = Counter()
     sites = Counter()
@@ -1759,7 +1758,6 @@ def _build_dashboard_stats(articles: list) -> dict:
 
 def _render_heatmap(day_counts: dict) -> str:
     """渲染最近 365 天热力图(53 周 × 7 天,列填 grid)。"""
-    import datetime
     today = datetime.date.today()
     start = today - datetime.timedelta(days=364)
     max_v = max(day_counts.values()) if day_counts else 1
@@ -1779,7 +1777,7 @@ def build_dashboard_html(root_dir: str, articles: list | None = None) -> str:
     articles:已扫描的文章列表,若为 None 则内部扫描一次。
     调用方(如 GUI 保存后同时更新 index 和 dashboard)可传入已扫描结果避免重复 I/O。
     """
-    import html as _h, os as _os
+    import html as _h
     base = articles if articles is not None else scan_saved_articles(root_dir)
     if not base:
         return _dashboard_empty_html()
@@ -1849,7 +1847,7 @@ def build_dashboard_html(root_dir: str, articles: list | None = None) -> str:
     # 极值卡片
     def _extreme(a: dict, label: str, extra_line: str) -> str:
         href = urllib.parse.quote(
-            _os.path.relpath(a["html_path"], root_dir).replace(_os.sep, "/"))
+            os.path.relpath(a["html_path"], root_dir).replace(os.sep, "/"))
         return (f'<a class="ex-card" href="{href}">'
                 f'<div class="ex-lbl">{label}</div>'
                 f'<div class="ex-title">{_h.escape(a["title"])}</div>'
