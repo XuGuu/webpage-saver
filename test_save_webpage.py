@@ -1227,6 +1227,142 @@ class TestMakeAppScript(unittest.TestCase):
         self.assertGreater(os.path.getsize(bat), 0, "空文件")
 
 
+class TestAppLauncherFinderEnv(unittest.TestCase):
+    """双击 .app 的真实场景:Finder 只给系统 PATH,启动器必须仍能启动。
+
+    回归背景(2026-07-06):用户双击 文章保存工具.app 无反应——
+    启动器写的是裸 `python3`,Finder 环境下解析到苹果自带的
+    /usr/bin/python3(没装第三方依赖),启动即崩且无任何提示。
+    修复要求:1) 打包时固化 python3 绝对路径;2) 启动失败要弹系统对话框;
+    3) 正式启动必须 exec(python 顶替启动器进程,App 身份/退出事件才正确)。
+    """
+
+    FINDER_PATH = "/usr/bin:/bin:/usr/sbin:/sbin"
+
+    @classmethod
+    def setUpClass(cls):
+        import os, shutil, subprocess, sys, tempfile, save_webpage
+        if sys.platform != "darwin":
+            raise unittest.SkipTest("仅 macOS(需要 sips/iconutil)")
+        repo_root = os.path.dirname(os.path.abspath(save_webpage.__file__))
+        cls.tmp = tempfile.mkdtemp(prefix="makeapp_test_")
+        proj = os.path.join(cls.tmp, "project")
+        os.makedirs(proj)
+        shutil.copy(os.path.join(repo_root, "make_app.command"), proj)
+        # 图标生成分支要 import save_webpage
+        shutil.copy(os.path.join(repo_root, "save_webpage.py"), proj)
+        # 桩 gui.py:import 一个系统 python 没有的依赖,复现真实故障面
+        with open(os.path.join(proj, "gui.py"), "w", encoding="utf-8") as f:
+            f.write("import requests\nprint('GUI_OK')\n")
+        # python3 垫片:让打包烤进启动器的 python == 跑测试的解释器,
+        # 测试才不随机器 PATH 第一个 python3 是谁而漂移
+        buildbin = os.path.join(cls.tmp, "buildbin")
+        os.makedirs(buildbin)
+        with open(os.path.join(buildbin, "python3"), "w", encoding="utf-8") as f:
+            f.write('#!/bin/bash\nexec "%s" "$@"\n' % sys.executable)
+        os.chmod(os.path.join(buildbin, "python3"), 0o755)
+        build_env = dict(os.environ)
+        build_env["PATH"] = buildbin + os.pathsep + build_env.get("PATH", "")
+        r = subprocess.run(["bash", os.path.join(proj, "make_app.command")],
+                           input=b"x", capture_output=True, timeout=180,
+                           env=build_env)
+        cls.build_out = (r.stdout.decode("utf-8", "replace")
+                         + r.stderr.decode("utf-8", "replace"))
+        cls.app = os.path.join(cls.tmp, "文章保存工具.app")
+        cls.run_path = os.path.join(cls.app, "Contents", "MacOS", "run")
+        if r.returncode != 0 or not os.path.exists(cls.run_path):
+            raise AssertionError(
+                f"构建失败(exit={r.returncode}):\n" + cls.build_out)
+        # 假 osascript:把收到的参数写进文件,证明弹窗被调用(不真弹、不阻塞)。
+        # 所有会跑启动器的用例都要把它排到 PATH 最前,失败路径才不会卡住等人点按钮。
+        cls.stub_dir = os.path.join(cls.tmp, "stubbin")
+        os.makedirs(cls.stub_dir)
+        cls.dialog_marker = os.path.join(cls.tmp, "dialog_args.txt")
+        with open(os.path.join(cls.stub_dir, "osascript"), "w", encoding="utf-8") as f:
+            # printf 而非 echo:echo 会把开头的 -e 参数当自己的选项吞掉
+            f.write('#!/bin/bash\nprintf \'%%s\\n\' "$@" > "%s"\n' % cls.dialog_marker)
+        os.chmod(os.path.join(cls.stub_dir, "osascript"), 0o755)
+        # 系统 python 若被人装过 requests,缺依赖场景就无法复现,相关用例跳过
+        probe = subprocess.run(["/usr/bin/python3", "-c", "import requests"],
+                               capture_output=True)
+        cls.system_py_has_requests = (probe.returncode == 0)
+
+    @classmethod
+    def tearDownClass(cls):
+        import shutil
+        shutil.rmtree(cls.tmp, ignore_errors=True)
+
+    def _launch_env(self):
+        """Finder 双击等价环境:受限 PATH + 假 osascript 打头。"""
+        return {"HOME": self.tmp,
+                "PATH": self.stub_dir + ":" + self.FINDER_PATH,
+                "LANG": "zh_CN.UTF-8"}
+
+    def _clear_run_artifacts(self):
+        import os
+        for p in (os.path.join(self.tmp, "Library", "Logs", "文章保存工具.log"),
+                  self.dialog_marker):
+            if os.path.exists(p):
+                os.remove(p)
+
+    def _read_launch_log(self):
+        import os
+        log = os.path.join(self.tmp, "Library", "Logs", "文章保存工具.log")
+        if os.path.exists(log):
+            with open(log, encoding="utf-8", errors="replace") as f:
+                return f.read()
+        return ""
+
+    def test_launch_with_finder_restricted_path(self):
+        """核心回归:受限 PATH 下启动必须成功(exit 0 且 gui 真的跑了)。"""
+        import subprocess
+        if self.system_py_has_requests:
+            self.skipTest("系统 /usr/bin/python3 装了 requests,场景无法复现")
+        self._clear_run_artifacts()
+        r = subprocess.run([self.run_path], env=self._launch_env(),
+                           capture_output=True, timeout=60)
+        out = (r.stdout.decode("utf-8", "replace")
+               + r.stderr.decode("utf-8", "replace"))
+        self.assertEqual(r.returncode, 0,
+                         f"Finder 受限 PATH 下启动失败:\n{out}\n{self._read_launch_log()}")
+        self.assertIn("GUI_OK", out + self._read_launch_log(),
+                      "gui.py 没有真正跑起来")
+
+    def test_launcher_bakes_absolute_python_path(self):
+        """启动器必须固化 python3 绝对路径(%q 输出,无引号),并有弹窗和 exec。"""
+        with open(self.run_path, encoding="utf-8") as f:
+            content = f.read()
+        self.assertRegex(content, r"(?m)^PY=/",
+                         "启动器没有固化 python3 绝对路径")
+        self.assertIn("osascript", content,
+                      "启动失败时应有 osascript 弹窗,不能无声无息")
+        self.assertRegex(content, r"(?m)^exec ",
+                         "正式启动必须 exec,否则 App 身份留在 bash 上")
+
+    def test_failure_shows_dialog(self):
+        """把固化路径换成缺依赖的系统 python 模拟启动失败:必须弹对话框。"""
+        import os, re, subprocess
+        if self.system_py_has_requests:
+            self.skipTest("系统 /usr/bin/python3 装了 requests,场景无法复现")
+        self._clear_run_artifacts()
+        with open(self.run_path, encoding="utf-8") as f:
+            content = f.read()
+        self.assertRegex(content, r"(?m)^PY=/", "启动器没有固化 python3 绝对路径")
+        broken = re.sub(r"(?m)^PY=.*$", "PY=/usr/bin/python3", content, count=1)
+        broken_run = os.path.join(self.tmp, "broken_run")
+        with open(broken_run, "w", encoding="utf-8") as f:
+            f.write(broken)
+        os.chmod(broken_run, 0o755)
+        r = subprocess.run([broken_run], env=self._launch_env(),
+                           capture_output=True, timeout=60)
+        self.assertNotEqual(r.returncode, 0, "缺依赖竟然启动成功了?")
+        self.assertTrue(os.path.exists(self.dialog_marker),
+                        "启动失败却没有调用 osascript 弹窗")
+        with open(self.dialog_marker, encoding="utf-8", errors="replace") as f:
+            dialog = f.read()
+        self.assertIn("启动失败", dialog, f"弹窗内容不对: {dialog}")
+
+
 class TestDefaultIconIco(unittest.TestCase):
     """默认 ICO 图标生成(Windows 打包用)。"""
 

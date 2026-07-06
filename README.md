@@ -61,6 +61,8 @@ python save_webpage.py "https://xxx" --pdf
 - 拖到「应用程序」或 Dock 就能像正常 App 一样双击启动
 - 想换图标:把 `assets/icon.png`(1024×1024)换成自己喜欢的图片,再重跑 `make_app.command`
 - 首次双击若系统提示「无法验证开发者」,右键 → 打开 → 仍要打开
+- 打包时会把**当前的 python3 路径**固化进 App(双击 App 时系统不认识你终端里的 Python)。
+  如果以后重装/换了 Python 导致 App 启动报错,重跑一次 `make_app.command` 即可
 
 ## 打包成 Windows 快捷方式
 
@@ -129,3 +131,8 @@ A: 能。图片会以 base64 嵌入 HTML 内部，单个文件打开就能看到
 
 **Q: 图片没保存？**
 A: 勾选「图片」才会保留 images/ 文件夹。不勾选时图片嵌入 HTML 后自动清理。
+
+**Q: 双击 文章保存工具.app 没反应或报「启动失败」？**
+A: 启动失败会弹出对话框说明原因，完整日志在 `~/Library/Logs/文章保存工具.log`。
+最常见原因是打包后重装/删除了 Python——重跑一次 `make_app.command` 重新打包即可。
+（旧版打包的 App 失败时什么都不提示，重新打包一次就能获得报错弹窗能力。）

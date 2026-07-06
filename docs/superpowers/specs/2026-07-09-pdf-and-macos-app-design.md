@@ -79,3 +79,17 @@
 - 测试脚本路径从硬编码 `/Users/xugu/…` 改为 `os.path.dirname(save_webpage.__file__)`,可在任何机器上跑
 - README:补 `--pdf` CLI 示例 + 「打包成 macOS App」小节
 - CLAUDE.md 文件清单:补 `make_app.command`
+
+## 实战修正(2026-07-06,用户实测双击无反应)
+
+上文「launcher 只需 4 行 shell」的设计**已作废**:裸 `python3` 在 Finder 的受限
+PATH(`/usr/bin:/bin:...`)下解析到苹果自带、没装依赖的解释器,启动即崩且无提示。
+launcher 现为 ~25 行(make_app.command 打包时生成),要点:
+
+- 打包时用 `printf %q` 固化 `command -v python3` 的**绝对路径**(路径特殊字符安全)
+- 运行时若固化路径失效,按 homebrew → /usr/local → 系统 python3 顺序回退
+- 预检 `"$PY" -c "import gui"`(gui.py 有 `__main__` 守卫,import 无副作用),
+  失败把日志末尾用 osascript 弹成对话框——绝不无声无息
+- 预检通过后 `exec "$PY" gui.py`:python 顶替启动器进程,App 身份/Dock/退出事件正确
+- 日志固定写 `~/Library/Logs/文章保存工具.log`(HOME 不可写时降级 TMPDIR)
+- 回归测试:test_save_webpage.TestAppLauncherFinderEnv(沙盒真实打包 + 受限 PATH 启动)
