@@ -1819,6 +1819,8 @@ class TestSourceUrl(unittest.TestCase):
         self.assertIn('class="src-link"', html)
         self.assertIn('href="https://mp.weixin.qq.com/s/abc123"', html)
         self.assertIn("原文链接", html)
+        # 新标签页 + 防反向 tabnabbing,重构丢失会被抓住(最终评审跟进)
+        self.assertIn('target="_blank" rel="noopener"', html)
 
     def test_html_url_special_chars_escaped(self):
         """URL 里的 & 和 \" 要转义,不能破坏 href 属性(XSS)。"""
