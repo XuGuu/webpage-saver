@@ -1839,6 +1839,30 @@ class TestSourceUrl(unittest.TestCase):
         self.assertNotIn('class="src-link"', html)
         self.assertNotIn("javascript:alert", html)
 
+    # ---- 端到端 ----
+
+    def test_save_article_files_contain_source_url(self):
+        """保存后 HTML 与 MD 文件里都能找到原文 URL。"""
+        import tempfile
+        from unittest.mock import patch
+        from save_webpage import save_article
+
+        url = "https://mp.weixin.qq.com/s/abc123"
+        with tempfile.TemporaryDirectory() as tmp:
+            fake = {"title": "带链文章", "author": "A", "date": "2026-07-01",
+                    "markdown": "正文", "images": [], "site": "公众号"}
+            with patch("save_webpage.extract_wechat", return_value=fake), \
+                 patch("save_webpage.detect_site", return_value="wechat"):
+                result = save_article(url, tmp, formats=["html", "md"],
+                                      use_subfolder=True)
+            self.assertFalse(result.get("error"))
+            html_file = next(f for f in result["files"] if f.endswith(".html"))
+            md_file = next(f for f in result["files"] if f.endswith(".md"))
+            with open(html_file, encoding="utf-8") as f:
+                self.assertIn(f'href="{url}"', f.read())
+            with open(md_file, encoding="utf-8") as f:
+                self.assertIn(f"原文: {url}", f.read())
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

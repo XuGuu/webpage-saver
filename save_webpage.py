@@ -1618,6 +1618,8 @@ def save_article(url: str, output_dir: str, formats: list[str] | None = None,
     except Exception as e:
         return {"error": str(e)}
 
+    data["url"] = url  # 原文链接随文章落盘(HTML meta 区 / MD 元信息头读取)
+
     title = data["title"]
     keep_images = "images" in formats  # 是否保留图片文件夹
     # HTML/MD/PDF 都要图;PDF 单独选中时也需要下载,让 embed_images 有素材
