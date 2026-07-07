@@ -1427,6 +1427,9 @@ def generate_html(data: dict, img_files: list[str | None], img_dir: str, embed_i
     site_badge = f'<span class="badge">{_site_html}</span>' if site else ""
     author_line = f'<span class="author">{_author_html}</span>' if author else ""
     date_line = f'<span class="date">{_date_html}</span>' if data.get("date") else ""
+    src_url = data.get("url") or ""
+    src_link = (f'<span><a class="src-link" href="{_e(src_url)}" target="_blank" '
+                f'rel="noopener">原文链接↗</a></span>') if _is_http_url(src_url) else ""
 
     return f'''<!DOCTYPE html>
 <html lang="zh-CN">
@@ -1459,6 +1462,8 @@ h4 {{ font-size: 15px; margin: 16px 0 8px; color: #555; }}
 .meta span {{ margin-right: 12px; }}
 .badge {{ background: #f0f0f0; padding: 2px 8px; border-radius: 4px; font-size: 12px; }}
 .author {{ color: #333; font-weight: 500; }}
+.src-link {{ color: #999; text-decoration: none; border-bottom: 1px dotted #ccc; }}
+.src-link:hover {{ color: #333; }}
 .content {{ font-size: 15px; color: #333; }}
 .content p {{ margin: 12px 0; }}
 .content strong {{ color: #1a1a1a; }}
@@ -1494,6 +1499,8 @@ h4 {{ font-size: 15px; margin: 16px 0 8px; color: #555; }}
   .meta {{ color: #999; border-color: #333; }}
   .author {{ color: #ccc; }}
   .badge {{ background: #2a2a2a; color: #ccc; }}
+  .src-link {{ color: #888; border-bottom-color: #555; }}
+  .src-link:hover {{ color: #ddd; }}
   .footer {{ color: #555; border-color: #333; }}
   .toc-panel {{ background: #202020; border-color: #333; color: #aaa; }}
   .toc-panel .toc-title {{ color: #ddd; }}
@@ -1507,7 +1514,7 @@ h4 {{ font-size: 15px; margin: 16px 0 8px; color: #555; }}
 {toc_panel}
 <h1>{_title_html}</h1>
 <div class="meta">
-  {site_badge} {author_line} {date_line}
+  {site_badge} {author_line} {date_line} {src_link}
 </div>
 <div class="content">
 {html_body}

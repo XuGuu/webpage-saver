@@ -1803,6 +1803,42 @@ class TestSourceUrl(unittest.TestCase):
         self.assertNotIn("javascript:", md)
         self.assertNotIn("原文", md)
 
+    # ---- HTML 侧 ----
+
+    def test_html_meta_has_source_link(self):
+        """meta 区有可点击的原文链接。"""
+        data = {"title": "T", "author": "A", "markdown": "正文", "site": "公众号",
+                "images": [], "url": "https://mp.weixin.qq.com/s/abc123"}
+        html = generate_html(data, [], "")
+        self.assertIn('class="src-link"', html)
+        self.assertIn('href="https://mp.weixin.qq.com/s/abc123"', html)
+        self.assertIn("原文链接", html)
+
+    def test_html_url_special_chars_escaped(self):
+        """URL 里的 & 和 \" 要转义,不能破坏 href 属性(XSS)。"""
+        data = {"title": "T", "author": "", "markdown": "正文", "site": "",
+                "images": [],
+                "url": 'https://example.com/a?x=1&y=2"onmouseover="alert(1)'}
+        html = generate_html(data, [], "")
+        self.assertIn("x=1&amp;y=2&quot;onmouseover=", html)
+        self.assertNotIn('y=2"onmouseover', html)
+
+    def test_html_no_url_no_source_link(self):
+        """没有 url 键时不出现 src-link(向后兼容)。"""
+        data = {"title": "T", "author": "A", "markdown": "正文", "site": "公众号",
+                "images": []}
+        html = generate_html(data, [], "")
+        self.assertNotIn('class="src-link"', html)
+        self.assertNotIn("原文链接", html)
+
+    def test_html_rejects_non_http_url(self):
+        """javascript: 伪协议不渲染成链接(守门)。"""
+        data = {"title": "T", "author": "", "markdown": "正文", "site": "",
+                "images": [], "url": "javascript:alert(1)"}
+        html = generate_html(data, [], "")
+        self.assertNotIn('class="src-link"', html)
+        self.assertNotIn("javascript:alert", html)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
