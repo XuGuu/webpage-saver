@@ -1762,5 +1762,47 @@ class TestZhihuMultiDetection(unittest.TestCase):
         self.assertFalse(_zhihu_is_question_page("https://zhuanlan.zhihu.com/p/123"))
 
 
+class TestSourceUrl(unittest.TestCase):
+    """保存的文章带原文链接(设计 2026-07-07)。"""
+
+    # ---- Markdown 侧 ----
+
+    def test_markdown_header_has_source_url(self):
+        """元信息头末尾带「原文: URL」。"""
+        from save_webpage import generate_markdown
+        data = {"title": "T", "author": "某作者", "date": "2026-07-01",
+                "site": "公众号", "markdown": "正文段落",
+                "url": "https://mp.weixin.qq.com/s/abc123"}
+        md = generate_markdown(data, [], "")
+        first_line = md.splitlines()[0]
+        self.assertTrue(first_line.startswith("> "))
+        self.assertIn("原文: https://mp.weixin.qq.com/s/abc123", first_line)
+
+    def test_markdown_url_only_still_outputs_header(self):
+        """日期/作者全空,仅有 url 也输出元信息头。"""
+        from save_webpage import generate_markdown
+        data = {"title": "T", "author": "", "date": "", "site": "",
+                "markdown": "正文", "url": "https://example.com/a"}
+        md = generate_markdown(data, [], "")
+        self.assertTrue(md.startswith("> 原文: https://example.com/a"))
+
+    def test_markdown_no_url_no_source_line(self):
+        """没有 url 键时头部不出现「原文」(向后兼容)。"""
+        from save_webpage import generate_markdown
+        data = {"title": "T", "author": "A", "date": "2026-07-01",
+                "site": "公众号", "markdown": "正文"}
+        md = generate_markdown(data, [], "")
+        self.assertNotIn("原文:", md)
+
+    def test_markdown_rejects_non_http_url(self):
+        """javascript: 伪协议不进元信息头(守门)。"""
+        from save_webpage import generate_markdown
+        data = {"title": "T", "author": "", "date": "", "site": "",
+                "markdown": "正文", "url": "javascript:alert(1)"}
+        md = generate_markdown(data, [], "")
+        self.assertNotIn("javascript:", md)
+        self.assertNotIn("原文", md)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

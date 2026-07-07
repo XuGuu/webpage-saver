@@ -1521,7 +1521,7 @@ def generate_markdown(data: dict, img_files: list[str | None], img_dir_name: str
     """生成给 LLM 用的 Markdown。"""
     md = data["markdown"]
 
-    # 元数据头:发布日期 + 作者/公众号
+    # 元数据头:发布日期 + 作者/公众号 + 原文链接
     date = data.get("date", "")
     author = data.get("author", "")
     site = data.get("site", "")
@@ -1531,6 +1531,9 @@ def generate_markdown(data: dict, img_files: list[str | None], img_dir_name: str
     if author:
         label = f"{site}:{author}" if site else author
         meta_bits.append(label)
+    src_url = data.get("url") or ""
+    if _is_http_url(src_url):
+        meta_bits.append(f"原文: {src_url}")
     if meta_bits:
         md = "> " + " · ".join(meta_bits) + "\n\n" + md
 
