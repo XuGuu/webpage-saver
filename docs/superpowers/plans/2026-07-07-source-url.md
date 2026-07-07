@@ -142,6 +142,8 @@ git commit -m "feat: generate_markdown 元信息头追加原文 URL(http 守门)
 
 ### Task 2: generate_html meta 区加「原文链接↗」
 
+> **修订(2026-07-07,实施中发现):** 原版负向测试断言 `assertNotIn("src-link", html)` 与常驻 `<style>` 里的 `.src-link` CSS 规则矛盾(实现后永远失败)。已收紧为 `assertNotIn('class="src-link"', html)`——只匹配真实链接元素,不碰 CSS。CSS 常驻是有意设计,与 `.badge`/`.author` 一致。
+
 **Files:**
 - Modify: `save_webpage.py:1421-1430`(元数据转义区)、`save_webpage.py:1509-1511`(meta 区模板)、`save_webpage.py:1458-1461` 与 `1494-1496`(样式)
 - Test: `test_save_webpage.py`(TestSourceUrl 类内追加)
@@ -174,7 +176,7 @@ git commit -m "feat: generate_markdown 元信息头追加原文 URL(http 守门)
         data = {"title": "T", "author": "A", "markdown": "正文", "site": "公众号",
                 "images": []}
         html = generate_html(data, [], "")
-        self.assertNotIn("src-link", html)
+        self.assertNotIn('class="src-link"', html)
         self.assertNotIn("原文链接", html)
 
     def test_html_rejects_non_http_url(self):
@@ -182,7 +184,7 @@ git commit -m "feat: generate_markdown 元信息头追加原文 URL(http 守门)
         data = {"title": "T", "author": "", "markdown": "正文", "site": "",
                 "images": [], "url": "javascript:alert(1)"}
         html = generate_html(data, [], "")
-        self.assertNotIn("src-link", html)
+        self.assertNotIn('class="src-link"', html)
         self.assertNotIn("javascript:alert", html)
 ```
 

@@ -46,7 +46,7 @@
 
 1. generate_html:data 带 url → 输出含 `class="src-link"` 且 href 为该 URL
 2. generate_html:URL 含 `"` 与 `&` → 属性值被转义(XSS)
-3. generate_html:data 无 url 键 / url 为空 → 不出现 src-link(向后兼容)
+3. generate_html:data 无 url 键 / url 为空 → 不渲染 src-link 链接元素(向后兼容;`.src-link` CSS 样式规则常驻 `<style>`,与 `.badge`/`.author` 一致,不在断言范围内)
 4. `javascript:` 伪协议 → generate_html 不渲染链接,generate_markdown 头部不输出「原文」(两侧守门一致)
 5. generate_markdown:带 url → 元信息头含 `原文: https://...`
 6. generate_markdown:日期/作者全空仅有 url → 仍输出 `> 原文: ...` 行
