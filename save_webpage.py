@@ -364,10 +364,11 @@ _HEADING_TAGS = ("h1", "h2", "h3", "h4", "h5", "h6")
 _STRUCTURE_TAGS = _HEADING_TAGS + ("ul", "ol", "blockquote", "pre", "table")
 
 
-def _inline_md(el) -> str:
-    """行内感知的文本提取：strong/b 包成 **加粗**，跳过脚本样式。
+def _inline_parts(el, br: str) -> list:
+    """收集行内片段为 (文本, 是否语法包装) 元组列表,拼接交给 _join_inline。
 
-    空白折叠为单个空格（保住英文单词边界），调用方对结果 strip()。
+    "语法包装"指 **加粗**、*斜体* 这类由本函数生成的 markdown 标记;
+    原文文字标 False——拼接守卫只调整语法段的间隔,绝不改动原文内容。
     """
     from bs4 import NavigableString, Comment
 
@@ -376,51 +377,108 @@ def _inline_md(el) -> str:
         if isinstance(child, Comment):
             continue
         if isinstance(child, NavigableString):
-            parts.append(re.sub(r'\s+', ' ', str(child)))
+            parts.append((re.sub(r'\s+', ' ', str(child)), False))
         elif child.name in ("script", "style"):
             continue
+        elif child.name == "br":
+            parts.append((br, False))
         elif child.name in ("strong", "b"):
-            inner = _inline_md(child).strip()
+            inner = _inline_md(child, " ").strip()
             if not inner:
                 continue
             if inner.startswith("**") and inner.endswith("**"):
-                parts.append(inner)  # 嵌套加粗（strong 套 b）不重复包
+                parts.append((inner, True))  # 嵌套加粗（strong 套 b）不重复包
+            elif re.fullmatch(r'\*[^*]+\*(?: \*[^*]+\*)*', inner):
+                # 内部全是斜体片段（微信编辑器常把一个词拆成几个 <em>）：
+                # 合并为一个 ***…***，避免 ***a* *b*** 这种病态星号串
+                parts.append((f"***{inner.replace('*', '')}***", True))
             else:
-                parts.append(f"**{inner}**")
+                parts.append((f"**{inner}**", True))
         elif child.name in ("em", "i"):
-            inner = _inline_md(child).strip()
+            inner = _inline_md(child, " ").strip()
             if inner and not (inner.startswith("*") and inner.endswith("*")):
-                parts.append(f"*{inner}*")
+                parts.append((f"*{inner}*", True))
             elif inner:
-                parts.append(inner)
+                parts.append((inner, True))
         elif child.name in ("del", "s", "strike"):
-            inner = _inline_md(child).strip()
+            inner = _inline_md(child, " ").strip()
             if inner:
-                parts.append(f"~~{inner}~~")
+                parts.append((f"~~{inner}~~", True))
         elif child.name == "u":
-            inner = _inline_md(child).strip()
+            inner = _inline_md(child, " ").strip()
             if inner:
                 # markdown 无原生下划线，用 HTML 标签直通（generate_html 会保护）
-                parts.append(f"<u>{inner}</u>")
+                parts.append((f"<u>{inner}</u>", True))
         elif child.name == "code":
-            inner = child.get_text().strip()
+            # 行内代码必须单行：内部换行/连续空白折叠为一个空格
+            inner = re.sub(r'\s+', ' ', child.get_text()).strip()
             if inner:
                 # 含反引号时用双反引号避免 markdown 语法歧义
                 fence = "``" if "`" in inner else "`"
                 pad = " " if inner.startswith("`") or inner.endswith("`") else ""
-                parts.append(f"{fence}{pad}{inner}{pad}{fence}")
+                parts.append((f"{fence}{pad}{inner}{pad}{fence}", True))
         elif child.name == "a":
             href = (child.get("href") or "").strip()
-            text = _inline_md(child).strip()
+            text = _inline_md(child, " ").strip()
             # 跳过页内锚点和危险 URL scheme（case-insensitive）
             unsafe = ("#", "javascript:", "data:", "vbscript:")
             if href and text and not href.lower().startswith(unsafe):
-                parts.append(f"[{text}]({href})")
+                parts.append((f"[{text}]({href})", True))
             elif text:
-                parts.append(text)
+                parts.append((text, False))
         else:
-            parts.append(_inline_md(child))
-    return "".join(parts)
+            # span/section 等透明容器：片段原样上抛,语法/原文标记跟着片段走
+            parts.extend(_inline_parts(child, br))
+    return parts
+
+
+def _needs_gap(prev: str, prev_syn: bool, cur: str, cur_syn: bool) -> bool:
+    """判断两个相邻片段之间要不要补一个空格。
+
+    ① 同字符语法标记相撞：*加粗* 紧贴 *斜体* 连成 ****，markdown 碎裂
+    ② CommonMark 边界规则：强调内容以标点结尾、闭合星号后紧跟字词
+       （***标签：***值）时闭合不被识别，星号会字面显示
+    ③ ② 的镜像：字词后紧跟以标点开头的强调（词*（注）*）无法开启
+    只在语法包装段参与时生效；两段原文相邻（如跨 span 的 2**32）不动。
+    """
+    import unicodedata
+    a, b = prev[-1], cur[0]
+    if (prev_syn or cur_syn) and a == b and a in "*~`":
+        return True
+    if prev_syn and a in "*~":
+        t = prev.rstrip("*~")
+        if t and b.isalnum() and unicodedata.category(t[-1]).startswith("P"):
+            return True
+    if cur_syn and b in "*~":
+        h = cur.lstrip("*~")
+        if h and a.isalnum() and unicodedata.category(h[0]).startswith("P"):
+            return True
+    return False
+
+
+def _join_inline(parts: list) -> str:
+    out = ""
+    prev_syn = False
+    for s, syn in parts:
+        if not s:
+            continue
+        if out and _needs_gap(out, prev_syn, s, syn):
+            out += " "
+        out += s
+        prev_syn = syn
+    return out
+
+
+def _inline_md(el, br: str = "<br>") -> str:
+    """行内感知的文本提取：strong/b 包成 **加粗**，跳过脚本样式。
+
+    空白折叠为单个空格（保住英文单词边界），调用方对结果 strip()。
+    br 参数决定 <br> 变成什么：段落里默认字面 "<br>"（markdown 合法的
+    硬换行，且不产生物理换行——物理换行会让 #/-/2. 开头的段内行被
+    generate_html 的块级正则误判成标题/列表）；列表项/表格单元格等
+    单行语境传 " "；强调标签内部一律折叠为空格。
+    """
+    return _join_inline(_inline_parts(el, br))
 
 
 def _render_list(list_el, depth: int) -> list:
@@ -433,7 +491,8 @@ def _render_list(list_el, depth: int) -> list:
         for sub in li.find_all(["ul", "ol"], recursive=False):
             sub_lists.append(sub.extract())
         # 剩下的整个 li 交给 _inline_md 处理,保留内嵌 strong/em/code 等格式
-        text = _inline_md(li).strip()
+        # （<br> 折叠为空格：列表项必须单行,换行会撑破列表结构）
+        text = _inline_md(li, " ").strip()
         prefix = "- " if list_el.name == "ul" else f"{i}. "
         if text:
             lines.append(indent + prefix + text)
@@ -526,7 +585,8 @@ def _collect_wechat_content(el, md_parts: list, img_urls: list):
             # 表格：首行当表头
             rows = []
             for tr in child.find_all("tr"):
-                cells = [_inline_md(c).strip().replace("|", "\\|")
+                # <br> 折叠为空格：表格一行必须是一行文本
+                cells = [_inline_md(c, " ").strip().replace("|", "\\|")
                          for c in tr.find_all(["th", "td"])]
                 if cells:
                     rows.append(cells)
@@ -1208,19 +1268,29 @@ def generate_html(data: dict, img_files: list[str | None], img_dir: str, embed_i
 
     html_body = re.sub(r'```\n?(.*?)\n?```', _stash_code, html_body, flags=re.DOTALL)
 
-    # 允许列表标签直通：把 <u>…</u> 先保护成占位符，转义后再放回
+    # 允许白名单标签直通：<u>…</u> 和 <br>（段内硬换行标记）先保护成占位符，转义后再放回
     inline_html: list[str] = []
 
     def _stash_inline(m):
         inline_html.append(m.group(0))
         return f"\uE010UTAG{len(inline_html) - 1}\uE011"
 
-    html_body = re.sub(r'</?u>', _stash_inline, html_body)
+    html_body = re.sub(r'</?u>|<br */?>', _stash_inline, html_body)
 
     # XSS 防护：转义 markdown 里的裸文本 HTML 元字符（<script> 之类不能直通到输出）
     # 代码块已被占位符替换，转义不影响；后续 markdown 语法自己生成的 <h1><strong> 等标签
     # 是硬编码字面串，此后不会再被转义
     html_body = _html_lib.escape(html_body, quote=False)
+
+    # 行内代码先锁住：`…` 里的星号等是字面内容,不能被后面的强调正则改写
+    inline_code: list[str] = []
+
+    def _stash_span(m):
+        inline_code.append(m.group(1))
+        return f"C{len(inline_code) - 1}"
+
+    html_body = re.sub(r'``\s?(.+?)\s?``', _stash_span, html_body)
+    html_body = re.sub(r'`([^`\n]+)`', _stash_span, html_body)
 
     html_body = re.sub(r'^#### (.+)$', r'<h4>\1</h4>', html_body, flags=re.MULTILINE)
     html_body = re.sub(r'^### (.+)$', r'<h3>\1</h3>', html_body, flags=re.MULTILINE)
@@ -1291,13 +1361,18 @@ def generate_html(data: dict, img_files: list[str | None], img_dir: str, embed_i
         lambda m: "<blockquote>" + "<br>".join(
             ln[5:] for ln in m.group(1).strip().splitlines()) + "</blockquote>\n",
         html_body, flags=re.MULTILINE)
+    # 加粗斜体 ***x***：必须在 ** 之前，否则会被拆成交错的错误标签。
+    # 内容不含星号、两侧不再有星号——只认"干净配对"的 ***…***,
+    # 避免跨两段不平衡星号串（**a *b*** 这类合法 markdown）错误配对
+    html_body = re.sub(r'(?<!\*)\*\*\*([^*\n]+?)\*\*\*(?!\*)',
+                       r'<strong><em>\1</em></strong>', html_body)
     html_body = re.sub(r'\*\*(.+?)\*\*', r'<strong>\1</strong>', html_body)
     # 斜体、删除线（在 ** 之后，避免 * 被误当成一半的 **;两侧要非字/非星，避免误吞乘号）
     html_body = re.sub(r'(?<![\*\w])\*([^\*\n]+?)\*(?![\*\w])', r'<em>\1</em>', html_body)
     html_body = re.sub(r'~~(.+?)~~', r'<del>\1</del>', html_body)
-    # 行内代码：先双反引号（可含单反引号），再单反引号
-    html_body = re.sub(r'``\s?(.+?)\s?``', r'<code>\1</code>', html_body)
-    html_body = re.sub(r'`([^`]+)`', r'<code>\1</code>', html_body)
+    # 放回行内代码（内容在转义之后锁住,本身已是安全文本）
+    for _ci, _cs in enumerate(inline_code):
+        html_body = html_body.replace(f"C{_ci}", f"<code>{_cs}</code>")
     html_body = re.sub(r'!\[([^\]]*)\]\(([^\)]+)\)', r'<img src="\2" alt="\1" style="max-width:100%;border-radius:8px;margin:12px 0">', html_body)
     html_body = re.sub(r'\[([^\]]+)\]\(([^\)]+)\)', r'<a href="\2">\1</a>', html_body)
     html_body = re.sub(r'\n\n+', '</p><p>', html_body)

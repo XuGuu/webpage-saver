@@ -590,6 +590,150 @@ class TestEmphasisStrikeUnderline(unittest.TestCase):
         self.assertIn("<del>删除线</del>", html)
 
 
+class TestBrAndAdjacentEmphasis(unittest.TestCase):
+    """<br> 换行保留 + 相邻强调段防撞(2026-07-06 OPD 文章回归)。
+
+    真实故障:论文作者/作者单位/论文出处三行(加粗斜体标签 + 斜体值,
+    <br> 分隔)被拼成一行,星号相撞成 ****,markdown 语法碎裂、
+    生成的 HTML 里星号字面可见。
+    """
+
+    URL = "https://mp.weixin.qq.com/s/x"
+
+    def test_br_separates_inline_runs_opd_regression(self):
+        """六段交替强调 + 两个 <br>:用 <br> 分行,星号不相撞(字节级)。
+
+        换行标记用字面 <br> 而非物理换行:物理换行会让 # / - / 2. 开头的
+        段内行被块级正则误判成标题/列表(评审确认的真实回归)。
+        """
+        html = make_page(
+            '<p><strong><em>论文作者：</em></strong><em>Mingyang Song &amp;MaoZheng</em><br/>'
+            '<strong><em>作者单位：</em></strong><em>Large Language Model Department，Tencent</em><br/>'
+            '<strong><em>论文出处：</em></strong><em>arXiv:2604.00626 [cs.LG] 18 May 2026</em></p>')
+        md = parse_wechat_html(html, self.URL)["markdown"]
+        expected = ("***论文作者：*** *Mingyang Song &MaoZheng*<br>"
+                    "***作者单位：*** *Large Language Model Department，Tencent*<br>"
+                    "***论文出处：*** *arXiv:2604.00626 [cs.LG] 18 May 2026*")
+        self.assertEqual(md, expected)
+
+    def test_bold_label_with_plain_value_gets_space(self):
+        """同族缺口:值不带斜体时,***标签：***紧跟字母在 CommonMark 里
+        无法闭合(闭合星号前是标点、后是字词)→ 必须补空格。"""
+        html = make_page(
+            '<p><strong><em>论文作者：</em></strong>Mingyang Song<br/>'
+            '<strong><em>作者单位：</em></strong>Tencent</p>')
+        md = parse_wechat_html(html, self.URL)["markdown"]
+        self.assertEqual(md, "***论文作者：*** Mingyang Song<br>***作者单位：*** Tencent")
+
+    def test_emphasis_starting_with_punctuation_after_word(self):
+        """镜像缺口:字词后紧跟以标点开头的斜体(如括号注释)同样无法开启。"""
+        html = make_page("<p>见<em>（注释）</em>说明</p>")
+        md = parse_wechat_html(html, self.URL)["markdown"]
+        self.assertEqual(md, "见 *（注释）* 说明")
+
+    def test_fragmented_em_inside_strong_merges(self):
+        """微信编辑器把一个词拆成多个 <em>:加粗内全斜体片段合并成一个 ***…***。"""
+        html = make_page("<p><strong><em>论文</em><em>作者</em></strong></p>")
+        md = parse_wechat_html(html, self.URL)["markdown"]
+        self.assertEqual(md, "***论文 作者***")
+
+    def test_literal_stars_in_text_not_mutated(self):
+        """防撞守卫不能碰原文内容:跨 span 断开的字面星号(2**32)不插空格。"""
+        html = make_page("<p>2*<span>*32</span></p>")
+        md = parse_wechat_html(html, self.URL)["markdown"]
+        self.assertEqual(md, "2**32")
+
+    def test_adjacent_bold_then_italic_gets_space(self):
+        """相邻 <strong> 和 <em>(无 br):中间补一个空格防星号相撞。"""
+        html = make_page("<p><strong>标签：</strong><em>取值</em></p>")
+        md = parse_wechat_html(html, self.URL)["markdown"]
+        self.assertEqual(md, "**标签：** *取值*")
+
+    def test_br_inside_list_item_becomes_space(self):
+        """列表项里的 <br> 降级为空格,列表结构不被撑破。"""
+        html = make_page("<ul><li>第一行<br/>第二行</li><li>另一项</li></ul>")
+        md = parse_wechat_html(html, self.URL)["markdown"]
+        self.assertIn("- 第一行 第二行", md)
+        self.assertIn("- 另一项", md)
+
+    def test_br_inside_table_cell_becomes_space(self):
+        """表格单元格里的 <br> 降级为空格,表格行保持单行。"""
+        html = make_page(
+            "<table><tr><th>列A</th><th>列B</th></tr>"
+            "<tr><td>上半<br/>下半</td><td>x</td></tr></table>")
+        md = parse_wechat_html(html, self.URL)["markdown"]
+        self.assertIn("| 上半 下半 | x |", md)
+
+    def test_br_inside_blockquote_keeps_lines(self):
+        """引用块里的 <br>:保留为 <br> 硬换行,引用前缀完好。"""
+        html = make_page("<blockquote>上一句<br/>下一句</blockquote>")
+        md = parse_wechat_html(html, self.URL)["markdown"]
+        self.assertIn("> 上一句<br>下一句", md)
+
+    def test_generate_html_renders_bold_italic_and_hard_break(self):
+        """***加粗斜体*** 渲染为 <strong><em>,<br> 标记直通为换行。"""
+        data = parse_wechat_html(make_page("<p>占位</p>"), self.URL)
+        data["markdown"] = "***标签：*** *取值*<br>***标签二：*** *取值二*"
+        html = generate_html(data, [], "")
+        self.assertIn("<strong><em>标签：</em></strong>", html)
+        self.assertIn("<em>取值</em>", html)
+        self.assertIn("<br>", html)
+        self.assertNotIn("***", html)
+        self.assertNotIn("&lt;br&gt;", html)
+
+    def test_br_line_not_promoted_to_block(self):
+        """<br> 后以 # / 2. / - / > 开头的内容不得被误判成标题/列表/引用。
+
+        评审确认的回归场景:'2026. 6. 25' 曾被列表正则重编号成 '1. 6. 25'。
+        """
+        html = make_page(
+            "<p>发布时间<br/>2026. 6. 25 更新<br/># 这是注释<br/>- 不是列表项</p>")
+        data = parse_wechat_html(html, self.URL)
+        out = generate_html(data, [], "")
+        body = out[out.index('<div class="content">'):]
+        self.assertIn("2026. 6. 25 更新", body)
+        self.assertNotIn("<ol>", body)
+        self.assertNotIn("<ul>", body)
+        self.assertNotIn("<h1># 这是注释</h1>", body)
+        self.assertNotIn("<h1>这是注释</h1>", body)
+
+    def test_unbalanced_bold_italic_not_scrambled(self):
+        """两段「加粗内含斜体结尾」不平衡星号串不得被 *** 规则跨段错配。"""
+        data = parse_wechat_html(make_page("<p>占位</p>"), self.URL)
+        data["markdown"] = "**a *b*** 中 **c *d***"
+        html = generate_html(data, [], "")
+        self.assertIn("中", html)
+        self.assertNotIn("*b", html)
+        self.assertNotIn("*d", html)
+
+    def test_inline_code_protected_from_emphasis(self):
+        """行内代码里的星号是字面内容,不得被加粗/斜体正则改写成标签。"""
+        data = parse_wechat_html(make_page("<p>占位</p>"), self.URL)
+        data["markdown"] = "运行 `x***y***z` 即可"
+        html = generate_html(data, [], "")
+        self.assertIn("<code>x***y***z</code>", html)
+
+    def test_code_with_newline_in_table_cell_stays_one_line(self):
+        """<code> 内换行在表格单元格里折叠为空格,表格行不被撑破。"""
+        html = make_page(
+            "<table><tr><th>列</th></tr>"
+            "<tr><td><code>x\ny</code></td></tr></table>")
+        md = parse_wechat_html(html, self.URL)["markdown"]
+        self.assertIn("| `x y` |", md)
+
+    def test_end_to_end_no_literal_stars_in_html(self):
+        """端到端:真实坏样本结构 → 生成 HTML 里不残留字面星号。"""
+        html_in = make_page(
+            '<p><strong><em>论文作者：</em></strong><em>Mingyang</em><br/>'
+            '<strong><em>作者单位：</em></strong><em>Tencent</em></p>')
+        data = parse_wechat_html(html_in, self.URL)
+        html_out = generate_html(data, [], "")
+        self.assertIn("<strong><em>论文作者：</em></strong>", html_out)
+        self.assertIn("<em>Mingyang</em>", html_out)
+        self.assertNotIn("***", html_out)
+        self.assertNotIn("****", data["markdown"])
+
+
 class TestNestedList(unittest.TestCase):
     """嵌套列表(内容质量 #6)。"""
 
