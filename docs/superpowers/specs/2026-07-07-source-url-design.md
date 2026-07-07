@@ -42,7 +42,7 @@
 
 ## 测试计划(TDD,先写失败测试)
 
-新增 `TestSourceUrl` 测试类,8 项:
+新增 `TestSourceUrl` 测试类,8 项(落地为 9 个测试方法:第 4 项拆 MD/HTML 两侧各一):
 
 1. generate_html:data 带 url → 输出含 `class="src-link"` 且 href 为该 URL
 2. generate_html:URL 含 `"` 与 `&` → 属性值被转义(XSS)
@@ -59,4 +59,4 @@
 
 - 保存任一文章,打开 HTML 首屏 meta 区能点「原文链接↗」跳回原文
 - 打开 MD,元信息头能复制到原文 URL
-- `python3 -m unittest test_save_webpage` 全绿(158 旧 + 8 新)
+- `python3 -m unittest test_save_webpage` 全绿(158 旧 + 9 新 = 167,实施时验收通过)
