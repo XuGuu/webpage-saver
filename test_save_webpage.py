@@ -1777,6 +1777,8 @@ class TestSourceUrl(unittest.TestCase):
         first_line = md.splitlines()[0]
         self.assertTrue(first_line.startswith("> "))
         self.assertIn("原文: https://mp.weixin.qq.com/s/abc123", first_line)
+        # 顺序钉死:发布于 · 作者 · 原文(评审跟进)
+        self.assertTrue(first_line.endswith(data["url"]), f"实际:{first_line}")
 
     def test_markdown_url_only_still_outputs_header(self):
         """日期/作者全空,仅有 url 也输出元信息头。"""
@@ -1793,6 +1795,10 @@ class TestSourceUrl(unittest.TestCase):
                 "site": "公众号", "markdown": "正文"}
         md = generate_markdown(data, [], "")
         self.assertNotIn("原文:", md)
+        # url 为空串/None 同样不渲染(spec:无 url 键 / url 为空)
+        for empty in ("", None):
+            data["url"] = empty
+            self.assertNotIn("原文:", generate_markdown(data, [], ""))
 
     def test_markdown_rejects_non_http_url(self):
         """javascript: 伪协议不进元信息头(守门)。"""
@@ -1830,6 +1836,10 @@ class TestSourceUrl(unittest.TestCase):
         html = generate_html(data, [], "")
         self.assertNotIn('class="src-link"', html)
         self.assertNotIn("原文链接", html)
+        # url 为空串/None 同样不渲染(spec:无 url 键 / url 为空)
+        for empty in ("", None):
+            data["url"] = empty
+            self.assertNotIn('class="src-link"', generate_html(data, [], ""))
 
     def test_html_rejects_non_http_url(self):
         """javascript: 伪协议不渲染成链接(守门)。"""

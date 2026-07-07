@@ -1540,6 +1540,7 @@ def generate_markdown(data: dict, img_files: list[str | None], img_dir_name: str
         meta_bits.append(label)
     src_url = data.get("url") or ""
     if _is_http_url(src_url):
+        # 纯文本不用 [原文](url):URL 含括号会破坏 markdown 链接语法
         meta_bits.append(f"原文: {src_url}")
     if meta_bits:
         md = "> " + " · ".join(meta_bits) + "\n\n" + md
