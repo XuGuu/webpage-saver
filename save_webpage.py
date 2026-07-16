@@ -716,6 +716,13 @@ def _pre_text(pre_el) -> str:
                 parts.append("\n")
                 last_end = None
                 continue
+            if child.name == "code":
+                # 老版「代码片段」控件:每行一个 <code> 兄弟、行间零文本,
+                # code 元素边界即行边界(行间已有换行文本时不叠加);
+                # 且边界无条件作废间隙基准,编号间隙不得跨行折算成幻影缩进
+                if parts and not parts[-1].endswith("\n"):
+                    parts.append("\n")
+                last_end = None
             pos = child.get("md-src-pos") if child.name in ("span", "code") else None
             m = re.fullmatch(r'(\d+)\.\.(\d+)', pos) if pos else None
             if m and int(m.group(1)) <= int(m.group(2)):

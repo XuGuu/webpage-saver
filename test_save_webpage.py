@@ -845,6 +845,38 @@ class TestPreLineStructure(unittest.TestCase):
         md = parse_wechat_html(html, self.URL)["markdown"]
         self.assertIn("line1\n\nline2", md)
 
+    def test_classic_code_snippet_each_code_is_a_line(self):
+        """老版代码片段控件:每行一个 <code> 兄弟、行间零文本 → 按行还原。
+
+        实测结构(2026-07-16,Loop Engineering 文章):
+        <pre class="code-snippet__js"><code>1. …</code><code>2. …</code>…</pre>
+        """
+        html = make_page(
+            '<pre class="code-snippet__js">'
+            '<code>1.&nbsp;启动本地服务，用浏览器工具打开页面</code>'
+            '<code>2.&nbsp;真实操作改动的控件</code>'
+            '<code>3.&nbsp;刷新页面确认状态保留</code></pre>')
+        md = parse_wechat_html(html, self.URL)["markdown"]
+        self.assertIn("1. 启动本地服务，用浏览器工具打开页面\n"
+                      "2. 真实操作改动的控件\n"
+                      "3. 刷新页面确认状态保留", md)
+
+    def test_code_boundary_always_invalidates_gap_baseline(self):
+        """code 边界无条件作废 md-src-pos 间隙基准:
+        即使上一行已带换行,编号间隙也不得跨边界折算成幻影缩进。"""
+        html = make_page(
+            '<pre><code md-src-pos="10..20">line1\n</code>'
+            '<code md-src-pos="25..35">line2</code></pre>')
+        md = parse_wechat_html(html, self.URL)["markdown"]
+        self.assertIn("line1\nline2", md)
+
+    def test_code_siblings_with_whitespace_between_no_double_newline(self):
+        """相邻 code 之间已有换行文本时不叠加换行(不出双空行)。"""
+        html = make_page("<pre><code>a</code>\n<code>b</code></pre>")
+        md = parse_wechat_html(html, self.URL)["markdown"]
+        self.assertIn("a\nb", md)
+        self.assertNotIn("a\n\nb", md)
+
     def test_pre_lines_survive_into_generated_html(self):
         """端到端:新版结构的代码块在生成的 HTML <pre> 里保持多行。"""
         html = make_page(
