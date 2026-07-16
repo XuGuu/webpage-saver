@@ -1010,6 +1010,73 @@ class TestColorHighlight(unittest.TestCase):
         html = generate_html(data, [], "")
         self.assertEqual(html.count(".content mark"), 2)
 
+    def test_paired_dark_bg_with_light_text_kept(self):
+        """成对配色:深蓝底+白字(话题标签药丸)成对保留,不受浅色门槛限制。"""
+        from save_webpage import _keep_color
+        self.assertEqual(
+            _keep_color("padding: 2px 8px;background: rgb(26, 115, 232);"
+                        "color: rgb(255, 255, 255);border-radius: 10px;"),
+            {"background-color": "#1a73e8", "color": "#ffffff"})
+
+    def test_low_contrast_pair_falls_back_to_single_rules(self):
+        """对比不足(亮度差<90)不成对:背景走浅色门槛被滤,彩字单独保留。"""
+        from save_webpage import _keep_color
+        self.assertEqual(
+            _keep_color("background-color: rgb(120,150,255); color: rgb(140,160,240);"),
+            {"color": "#8ca0f0"})
+
+    def test_white_text_alone_still_dropped(self):
+        """白字单独出现(没配背景)仍是噪音,过滤。"""
+        from save_webpage import _keep_color
+        self.assertIsNone(_keep_color("color: rgb(255,255,255);"))
+
+    def test_adjacent_pills_get_space(self):
+        """相邻药丸 mark 之间补一个空格,不再粘连。"""
+        html = make_page(
+            '<p><span style="background: rgb(26,115,232);color: rgb(255,255,255);">'
+            'AI Coding</span>'
+            '<span style="background: rgb(26,115,232);color: rgb(255,255,255);">'
+            '工作流选型</span></p>')
+        md = parse_wechat_html(html, self.URL)["markdown"]
+        self.assertEqual(
+            md,
+            '<mark style="background-color:#1a73e8;color:#ffffff">AI Coding</mark> '
+            '<mark style="background-color:#1a73e8;color:#ffffff">工作流选型</mark>')
+
+    def test_nested_pill_inner_bg_restates_paired_text_color(self):
+        """嵌套药丸:内层不同底色时,被去重的白字必须重申——
+        绝不产出「只有深底没有字色」的不可读 mark。"""
+        html = make_page(
+            '<p><span style="background: rgb(26,115,232);color: rgb(255,255,255);">外'
+            '<span style="background: rgb(200,0,80);color: rgb(255,255,255);">内</span>'
+            '</span></p>')
+        md = parse_wechat_html(html, self.URL)["markdown"]
+        self.assertIn(
+            '<mark style="background-color:#c80050;color:#ffffff">内</mark>', md)
+
+    def test_pair_requires_intentional_text_color(self):
+        """成对规则只认「刻意的」文字色(彩色或浅色);
+        黄底 + 编辑器默认近黑字 → 只留黄底,不复活噪音字色。"""
+        from save_webpage import _keep_color
+        self.assertEqual(
+            _keep_color("background-color: rgb(253,236,200); color: rgb(55,53,47);"),
+            {"background-color": "#fdecc8"})
+
+    def test_identical_nested_pill_still_deduped(self):
+        """完全同色的嵌套药丸仍只包一层(回归保险)。"""
+        html = make_page(
+            '<p><span style="background: rgb(26,115,232);color: rgb(255,255,255);">'
+            '<span style="background: rgb(26,115,232);color: rgb(255,255,255);">'
+            '标签</span></span></p>')
+        md = parse_wechat_html(html, self.URL)["markdown"]
+        self.assertEqual(md.count("<mark"), 1)
+
+    def test_literal_mark_text_does_not_trigger_gap(self):
+        """正文里字面出现的 </mark><mark 是原文内容(非语法段),规则④不补空格。"""
+        html = make_page("<p>a&lt;/mark&gt;&lt;mark b</p>")
+        md = parse_wechat_html(html, self.URL)["markdown"]
+        self.assertEqual(md, "a</mark><mark b")
+
     def test_end_to_end_highlight_and_colored_code(self):
         html_in = make_page(
             '<p><span style="background-color: rgb(253, 236, 200);">'

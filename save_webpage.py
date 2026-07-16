@@ -389,8 +389,10 @@ def _parse_css_color(token: str):
 def _keep_color(style) -> dict | None:
     """从 style 属性挑出「作者刻意上的色」,排版噪音一律不要。
 
-    规则(见 2026-07-16 设计):RGB 三通道差 ≥ 24 = 彩色(刻意强调)
-    保留并规范化为 #rrggbb;黑白灰、近透明(a<0.5)、关键字 = 噪音丢弃。
+    规则(见 2026-07-16 设计及修订):RGB 三通道差 ≥ 24 = 彩色(刻意强调)
+    保留并规范化为 #rrggbb;黑白灰、近透明(a<0.5)、关键字 = 噪音丢弃;
+    单独背景另设浅色门槛(亮度 ≥ 180);彩色背景 + 刻意文字色且对比足够时
+    成对保留(话题标签药丸),深色底放行。
     返回 {"color": "#xxxxxx"} / {"background-color": …} / 两者兼有 / None。
     """
     if not style:
@@ -404,7 +406,7 @@ def _keep_color(style) -> dict | None:
             target = "background-color"
         else:
             continue
-        # CSS 语义:同属性后声明覆盖前声明——先清掉旧值,能解析出保留色再写回
+        # CSS 语义:同属性后声明覆盖前声明——先清掉旧值,能解析出颜色再写回
         out.pop(target, None)
         # url(…#hex) 里的锚点不是颜色,先剔除再找颜色 token
         val = re.sub(r'url\([^)]*\)', '', val, flags=re.IGNORECASE)
@@ -415,14 +417,34 @@ def _keep_color(style) -> dict | None:
         if not parsed:
             continue
         r, g, b, a = parsed
-        if a < 0.5 or max(r, g, b) - min(r, g, b) < 24:
+        if a < 0.5:
             continue
-        if target == "background-color" and 0.299 * r + 0.587 * g + 0.114 * b < 180:
-            # 浅色门槛:荧光笔高亮都是浅底;深色底徽章转 mark 后强制深字
-            # 会在深底上不可读,宁可降级为无样式
-            continue
-        out[target] = f"#{r:02x}{g:02x}{b:02x}"
-    return out or None
+        out[target] = (r, g, b)
+
+    def _lum(c):
+        return 0.299 * c[0] + 0.587 * c[1] + 0.114 * c[2]
+
+    def _chroma(c):
+        return max(c) - min(c)
+
+    def _hex(c):
+        return f"#{c[0]:02x}{c[1]:02x}{c[2]:02x}"
+
+    bg, fg = out.get("background-color"), out.get("color")
+    # 成对配色:彩色背景 + 「刻意的」文字色(彩色或浅色;编辑器默认近黑字
+    # 不算,免得复活噪音)+ 明暗对比足够(亮度差≥90)→ 成对保留,
+    # 深色底也放行(白字是作者自带的,不依赖强制深字,亮暗主题自洽)
+    if (bg and fg and _chroma(bg) >= 24
+            and (_chroma(fg) >= 24 or _lum(fg) >= 180)
+            and abs(_lum(bg) - _lum(fg)) >= 90):
+        return {"background-color": _hex(bg), "color": _hex(fg)}
+    kept = {}
+    if bg and _chroma(bg) >= 24 and _lum(bg) >= 180:
+        # 浅色门槛:单独的荧光笔高亮都是浅底;深色底配强制深字会不可读
+        kept["background-color"] = _hex(bg)
+    if fg and _chroma(fg) >= 24:
+        kept["color"] = _hex(fg)
+    return kept or None
 
 
 def _effective_color(el, active: frozenset):
@@ -431,7 +453,13 @@ def _effective_color(el, active: frozenset):
     if not kept:
         return None
     eff = {k: v for k, v in kept.items() if (k, v) not in active}
-    return eff or None
+    if not eff:
+        return None
+    # 内层底色不同、字色与外层相同被去重时:字色必须重申——
+    # 绝不产出「只有深底没有字色」的不可读 mark(评审确认项)
+    if "background-color" in eff and "color" not in eff and "color" in kept:
+        eff["color"] = kept["color"]
+    return eff
 
 
 def _merge_active(active: frozenset, kept: dict) -> frozenset:
@@ -550,6 +578,7 @@ def _needs_gap(prev: str, prev_syn: bool, cur: str, cur_syn: bool) -> bool:
     ② CommonMark 边界规则：强调内容以标点结尾、闭合星号后紧跟字词
        （***标签：***值）时闭合不被识别，星号会字面显示
     ③ ② 的镜像：字词后紧跟以标点开头的强调（词*（注）*）无法开启
+    ④ 相邻两个生成的高亮块（</mark> 紧接 <mark）补空格，药丸标签不粘连
     只在语法包装段参与时生效；两段原文相邻（如跨 span 的 2**32）不动。
     """
     import unicodedata
@@ -564,6 +593,10 @@ def _needs_gap(prev: str, prev_syn: bool, cur: str, cur_syn: bool) -> bool:
         h = cur.lstrip("*~")
         if h and a.isalnum() and unicodedata.category(h[0]).startswith("P"):
             return True
+    # ④相邻两个高亮块(话题标签药丸)补空格,不粘连
+    #   (实测真实文章不存在「同一高亮被拆成相邻两段」,不会误伤)
+    if prev_syn and cur_syn and prev.endswith("</mark>") and cur.startswith("<mark "):
+        return True
     return False
 
 
