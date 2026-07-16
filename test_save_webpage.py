@@ -734,6 +734,130 @@ class TestBrAndAdjacentEmphasis(unittest.TestCase):
         self.assertNotIn("****", data["markdown"])
 
 
+class TestPreLineStructure(unittest.TestCase):
+    """<pre> 代码块的微信新版编辑器结构(2026-07-16 vLLM 文章回归)。
+
+    真实故障:新版编辑器(带 md-src-pos)把换行渲染成 <br> 元素、
+    缩进用 &nbsp;,相邻高亮词之间的空格甚至不在 DOM 文本里(只在
+    md-src-pos 编号间隙里)。get_text() 提取导致:ASCII 架构图压成
+    一行、async def 粘成 asyncdef。
+    """
+
+    URL = "https://mp.weixin.qq.com/s/x"
+
+    def test_pre_br_elements_become_newlines(self):
+        """<br> 元素 = 代码换行:ASCII 图的三行必须还原成三行。"""
+        html = make_page(
+            '<pre><code>'
+            '<span md-src-pos="10..20"><span leaf="">┌────┐</span></span>'
+            '<span md-src-pos="20..21"><span leaf=""><br/></span></span>'
+            '<span md-src-pos="21..31"><span leaf="">│ 标题 │</span></span>'
+            '<span md-src-pos="31..32"><span leaf=""><br/></span></span>'
+            '<span md-src-pos="32..42"><span leaf="">└────┘</span></span>'
+            '</code></pre>')
+        md = parse_wechat_html(html, self.URL)["markdown"]
+        self.assertIn("┌────┐\n│ 标题 │\n└────┘", md)
+
+    def test_pre_md_src_pos_gap_restores_swallowed_space(self):
+        """相邻高亮词的空格被微信吞掉,从 md-src-pos 编号间隙还原。
+
+        实测结构:async 占 7970..7975,def 占 7976..7979,
+        间隙 7975→7976 正是被吞的那个空格。
+        """
+        html = make_page(
+            '<pre><code md-src-pos="7922..8504">'
+            '<span md-src-pos="7970..7975"><span leaf="">async</span></span>'
+            '<span md-src-pos="7976..7979"><span leaf="">def</span></span>'
+            '<span md-src-pos="7979..8026"><span leaf="">&nbsp;_create_completion(self):</span></span>'
+            '</code></pre>')
+        md = parse_wechat_html(html, self.URL)["markdown"]
+        self.assertIn("async def _create_completion(self):", md)
+
+    def test_pre_nbsp_becomes_regular_space(self):
+        """代码里的 &nbsp; 缩进转成普通空格(复制代码才能直接运行)。"""
+        html = make_page(
+            '<pre><code><span leaf="">if x:</span>'
+            '<span leaf=""><br/></span>'
+            '<span leaf="">&nbsp;&nbsp;&nbsp;&nbsp;return 1</span></code></pre>')
+        md = parse_wechat_html(html, self.URL)["markdown"]
+        self.assertIn("if x:\n    return 1", md)
+        self.assertNotIn("\xa0", md)
+
+    def test_pre_classic_plain_text_unchanged(self):
+        """老编辑器的纯文本代码块(真实换行)原样直通——回归保护。"""
+        html = make_page("<pre><code>def foo():\n    return 1</code></pre>")
+        md = parse_wechat_html(html, self.URL)["markdown"]
+        self.assertIn("def foo():\n    return 1", md)
+
+    def test_bare_text_between_positioned_spans_no_phantom_space(self):
+        """带位置 span 之间夹着真实文本时,不得再按编号间隙注入幻影空格。"""
+        html = make_page(
+            '<pre><code>'
+            '<span md-src-pos="100..105"><span leaf="">async</span></span>'
+            ' = '
+            '<span md-src-pos="108..111"><span leaf="">foo</span></span>'
+            '</code></pre>')
+        md = parse_wechat_html(html, self.URL)["markdown"]
+        self.assertIn("async = foo", md)
+
+    def test_bare_br_between_positioned_spans_no_phantom_indent(self):
+        """裸 <br>(不带位置包装)之后不得注入幻影行首空格。"""
+        html = make_page(
+            '<pre><code>'
+            '<span md-src-pos="10..15"><span leaf="">line1</span></span>'
+            '<br/>'
+            '<span md-src-pos="16..21"><span leaf="">line2</span></span>'
+            '</code></pre>')
+        md = parse_wechat_html(html, self.URL)["markdown"]
+        self.assertIn("line1\nline2", md)
+
+    def test_nested_positioned_span_no_double_gap(self):
+        """带位置元素嵌套带位置元素:间隙只按外层填一次。"""
+        html = make_page(
+            '<pre><code>'
+            '<span md-src-pos="90..98"><span leaf="">prevtok!</span></span>'
+            '<span md-src-pos="100..200">'
+            '<span md-src-pos="100..105"><span leaf="">child</span></span>'
+            '</span></code></pre>')
+        md = parse_wechat_html(html, self.URL)["markdown"]
+        self.assertIn("prevtok!  child", md)
+        self.assertNotIn("prevtok!    child", md)
+
+    def test_reversed_md_src_pos_ignored(self):
+        """反向区间(200..100)是脏数据,不得成为间隙基准。"""
+        html = make_page(
+            '<pre><code>'
+            '<span md-src-pos="200..100"><span leaf="">bad</span></span>'
+            '<span md-src-pos="105..108"><span leaf="">tok</span></span>'
+            '</code></pre>')
+        md = parse_wechat_html(html, self.URL)["markdown"]
+        self.assertIn("badtok", md)
+
+    def test_consecutive_br_spans_keep_blank_line(self):
+        """连续两个 <br> 行 = 代码空行,原样保留(回归保险)。"""
+        html = make_page(
+            '<pre><code>'
+            '<span md-src-pos="10..15"><span leaf="">line1</span></span>'
+            '<span md-src-pos="15..16"><span leaf=""><br/></span></span>'
+            '<span md-src-pos="16..17"><span leaf=""><br/></span></span>'
+            '<span md-src-pos="17..22"><span leaf="">line2</span></span>'
+            '</code></pre>')
+        md = parse_wechat_html(html, self.URL)["markdown"]
+        self.assertIn("line1\n\nline2", md)
+
+    def test_pre_lines_survive_into_generated_html(self):
+        """端到端:新版结构的代码块在生成的 HTML <pre> 里保持多行。"""
+        html = make_page(
+            '<pre><code>'
+            '<span md-src-pos="10..20"><span leaf="">┌────┐</span></span>'
+            '<span md-src-pos="20..21"><span leaf=""><br/></span></span>'
+            '<span md-src-pos="21..31"><span leaf="">│ 标题 │</span></span>'
+            '</code></pre>')
+        data = parse_wechat_html(html, self.URL)
+        out = generate_html(data, [], "")
+        self.assertIn("┌────┐\n│ 标题 │", out)
+
+
 class TestNestedList(unittest.TestCase):
     """嵌套列表(内容质量 #6)。"""
 

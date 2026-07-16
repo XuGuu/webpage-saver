@@ -540,6 +540,54 @@ def _is_fake_heading(el) -> bool:
     return False
 
 
+def _pre_text(pre_el) -> str:
+    """从 <pre> 提取代码文本,兼容微信新版编辑器的行结构。
+
+    新版编辑器(元素带 md-src-pos 源码位置)把换行渲染成 <br> 元素、
+    缩进用 \\xa0(&nbsp;),相邻高亮词之间的空格甚至不在 DOM 文本里——
+    只能从 md-src-pos 的编号间隙推回来(async 占 7970..7975、def 占
+    7976..7979,间隙 1 就是被吞的空格)。老编辑器是纯文本+真实换行,
+    走 NavigableString 分支原样直通。
+    """
+    from bs4 import NavigableString, Comment
+
+    parts = []
+    last_end = None
+
+    def walk(el):
+        nonlocal last_end
+        for child in el.children:
+            if isinstance(child, Comment):
+                continue
+            if isinstance(child, NavigableString):
+                s = str(child)
+                if s:
+                    parts.append(s)
+                    # 出现无位置的真实内容后,间隙基准作废——
+                    # 否则中间内容的源码区间会被二次折算成幻影空格
+                    last_end = None
+                continue
+            if child.name == "br":
+                parts.append("\n")
+                last_end = None
+                continue
+            pos = child.get("md-src-pos") if child.name in ("span", "code") else None
+            m = re.fullmatch(r'(\d+)\.\.(\d+)', pos) if pos else None
+            if m and int(m.group(1)) <= int(m.group(2)):
+                start, end = int(m.group(1)), int(m.group(2))
+                # 编号间隙 = 渲染时被吞的空格;设上限防异常编号灌入大段空白
+                if last_end is not None and 0 < start - last_end <= 40:
+                    parts.append(" " * (start - last_end))
+                last_end = None  # 防「带位置嵌套带位置」对同一间隙双倍填充
+                walk(child)
+                last_end = end
+            else:
+                walk(child)
+
+    walk(pre_el)
+    return "".join(parts).replace("\xa0", " ")
+
+
 def _collect_wechat_content(el, md_parts: list, img_urls: list):
     """按文档顺序递归收集文字和图片，保留标题/列表/引用/加粗结构。"""
     from bs4 import NavigableString, Comment
@@ -561,7 +609,8 @@ def _collect_wechat_content(el, md_parts: list, img_urls: list):
             continue
         elif child.name == "pre":
             # 代码块：三反引号围栏，原样保留缩进和换行
-            code = child.get_text()
+            # （新版编辑器的 <br> 行结构和被吞的词间空格由 _pre_text 还原）
+            code = _pre_text(child)
             code = code.strip("\n")
             if code:
                 md_parts.append(f"```\n{code}\n```")
