@@ -364,11 +364,100 @@ _HEADING_TAGS = ("h1", "h2", "h3", "h4", "h5", "h6")
 _STRUCTURE_TAGS = _HEADING_TAGS + ("ul", "ol", "blockquote", "pre", "table")
 
 
-def _inline_parts(el, br: str) -> list:
+def _parse_css_color(token: str):
+    """解析 rgb()/rgba()/#hex 颜色 token → (r, g, b, a),认不出返回 None。"""
+    token = token.strip()
+    m = re.fullmatch(r'#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})', token)
+    if m:
+        h = m.group(1)
+        if len(h) == 3:
+            h = "".join(c * 2 for c in h)
+        return int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16), 1.0
+    m = re.fullmatch(
+        r'rgba?\(\s*(\d{1,3})\s*,\s*(\d{1,3})\s*,\s*(\d{1,3})\s*(?:,\s*([\d.]+)\s*)?\)',
+        token, re.IGNORECASE)
+    if m:
+        try:
+            r, g, b = (min(int(m.group(i)), 255) for i in (1, 2, 3))
+            a = float(m.group(4)) if m.group(4) else 1.0
+        except ValueError:
+            return None  # 畸形值(如 1.2.3):静默丢弃,绝不让保存崩溃
+        return r, g, b, a
+    return None
+
+
+def _keep_color(style) -> dict | None:
+    """从 style 属性挑出「作者刻意上的色」,排版噪音一律不要。
+
+    规则(见 2026-07-16 设计):RGB 三通道差 ≥ 24 = 彩色(刻意强调)
+    保留并规范化为 #rrggbb;黑白灰、近透明(a<0.5)、关键字 = 噪音丢弃。
+    返回 {"color": "#xxxxxx"} / {"background-color": …} / 两者兼有 / None。
+    """
+    if not style:
+        return None
+    out = {}
+    for prop, val in re.findall(r'([-a-zA-Z]+)\s*:\s*([^;]+)', style):
+        p = prop.lower()
+        if p == "color":
+            target = "color"
+        elif p in ("background-color", "background"):
+            target = "background-color"
+        else:
+            continue
+        # CSS 语义:同属性后声明覆盖前声明——先清掉旧值,能解析出保留色再写回
+        out.pop(target, None)
+        # url(…#hex) 里的锚点不是颜色,先剔除再找颜色 token
+        val = re.sub(r'url\([^)]*\)', '', val, flags=re.IGNORECASE)
+        m = re.search(r'rgba?\([^)]*\)|#[0-9a-fA-F]{3,6}\b', val, re.IGNORECASE)
+        if not m:
+            continue
+        parsed = _parse_css_color(m.group(0))
+        if not parsed:
+            continue
+        r, g, b, a = parsed
+        if a < 0.5 or max(r, g, b) - min(r, g, b) < 24:
+            continue
+        if target == "background-color" and 0.299 * r + 0.587 * g + 0.114 * b < 180:
+            # 浅色门槛:荧光笔高亮都是浅底;深色底徽章转 mark 后强制深字
+            # 会在深底上不可读,宁可降级为无样式
+            continue
+        out[target] = f"#{r:02x}{g:02x}{b:02x}"
+    return out or None
+
+
+def _effective_color(el, active: frozenset):
+    """元素的保留色去掉已在外层生效的部分(嵌套同色不套娃)。"""
+    kept = _keep_color(el.get("style"))
+    if not kept:
+        return None
+    eff = {k: v for k, v in kept.items() if (k, v) not in active}
+    return eff or None
+
+
+def _merge_active(active: frozenset, kept: dict) -> frozenset:
+    """就近祖先语义:同属性以内层为准(红→蓝→红,最内层红重新生效)。"""
+    return (frozenset((k, v) for k, v in active if k not in kept)
+            | frozenset(kept.items()))
+
+
+def _wrap_color(text: str, kept) -> str:
+    """把保留色包成 mark/span 小标签(generate_html 白名单只认这两种精确形态)。"""
+    if not kept:
+        return text
+    if "background-color" in kept:
+        style = "background-color:" + kept["background-color"]
+        if "color" in kept:
+            style += ";color:" + kept["color"]
+        return f'<mark style="{style}">{text}</mark>'
+    return f'<span style="color:{kept["color"]}">{text}</span>'
+
+
+def _inline_parts(el, br: str, active: frozenset = frozenset()) -> list:
     """收集行内片段为 (文本, 是否语法包装) 元组列表,拼接交给 _join_inline。
 
     "语法包装"指 **加粗**、*斜体* 这类由本函数生成的 markdown 标记;
     原文文字标 False——拼接守卫只调整语法段的间隔,绝不改动原文内容。
+    active 是外层已生效的颜色对集合,用于嵌套同色不重复包装。
     """
     from bs4 import NavigableString, Comment
 
@@ -383,29 +472,34 @@ def _inline_parts(el, br: str) -> list:
         elif child.name == "br":
             parts.append((br, False))
         elif child.name in ("strong", "b"):
-            inner = _inline_md(child, " ").strip()
+            kept = _effective_color(child, active)
+            sub = _merge_active(active, kept) if kept else active
+            inner = _inline_md(child, " ", sub).strip()
             if not inner:
                 continue
             if inner.startswith("**") and inner.endswith("**"):
-                parts.append((inner, True))  # 嵌套加粗（strong 套 b）不重复包
+                base = inner  # 嵌套加粗（strong 套 b）不重复包
             elif re.fullmatch(r'\*[^*]+\*(?: \*[^*]+\*)*', inner):
                 # 内部全是斜体片段（微信编辑器常把一个词拆成几个 <em>）：
                 # 合并为一个 ***…***，避免 ***a* *b*** 这种病态星号串
-                parts.append((f"***{inner.replace('*', '')}***", True))
+                base = f"***{inner.replace('*', '')}***"
             else:
-                parts.append((f"**{inner}**", True))
+                base = f"**{inner}**"
+            parts.append((_wrap_color(base, kept), True))
         elif child.name in ("em", "i"):
-            inner = _inline_md(child, " ").strip()
+            kept = _effective_color(child, active)
+            sub = _merge_active(active, kept) if kept else active
+            inner = _inline_md(child, " ", sub).strip()
             if inner and not (inner.startswith("*") and inner.endswith("*")):
-                parts.append((f"*{inner}*", True))
+                parts.append((_wrap_color(f"*{inner}*", kept), True))
             elif inner:
-                parts.append((inner, True))
+                parts.append((_wrap_color(inner, kept), True))
         elif child.name in ("del", "s", "strike"):
-            inner = _inline_md(child, " ").strip()
+            inner = _inline_md(child, " ", active).strip()
             if inner:
                 parts.append((f"~~{inner}~~", True))
         elif child.name == "u":
-            inner = _inline_md(child, " ").strip()
+            inner = _inline_md(child, " ", active).strip()
             if inner:
                 # markdown 无原生下划线，用 HTML 标签直通（generate_html 会保护）
                 parts.append((f"<u>{inner}</u>", True))
@@ -416,10 +510,12 @@ def _inline_parts(el, br: str) -> list:
                 # 含反引号时用双反引号避免 markdown 语法歧义
                 fence = "``" if "`" in inner else "`"
                 pad = " " if inner.startswith("`") or inner.endswith("`") else ""
-                parts.append((f"{fence}{pad}{inner}{pad}{fence}", True))
+                kept = _effective_color(child, active)
+                parts.append(
+                    (_wrap_color(f"{fence}{pad}{inner}{pad}{fence}", kept), True))
         elif child.name == "a":
             href = (child.get("href") or "").strip()
-            text = _inline_md(child, " ").strip()
+            text = _inline_md(child, " ", active).strip()
             # 跳过页内锚点和危险 URL scheme（case-insensitive）
             unsafe = ("#", "javascript:", "data:", "vbscript:")
             if href and text and not href.lower().startswith(unsafe):
@@ -427,8 +523,23 @@ def _inline_parts(el, br: str) -> list:
             elif text:
                 parts.append((text, False))
         else:
-            # span/section 等透明容器：片段原样上抛,语法/原文标记跟着片段走
-            parts.extend(_inline_parts(child, br))
+            # span/section 等透明容器：带保留色则包色后整体上抛,
+            # 否则片段原样上抛,语法/原文标记跟着片段走
+            kept = _effective_color(child, active)
+            if kept:
+                sub = _merge_active(active, kept)
+                raw = _join_inline(_inline_parts(child, br, sub))
+                inner = raw.strip()
+                if inner:
+                    # 容器自带的首尾空格移到色标签外面,不吞词间距
+                    lead = " " if raw[:1] == " " else ""
+                    trail = " " if raw[-1:] == " " else ""
+                    parts.append((lead + _wrap_color(inner, kept) + trail, True))
+                elif raw:
+                    # 纯空白的彩色容器:保住词间空格,不上色
+                    parts.append((" ", False))
+            else:
+                parts.extend(_inline_parts(child, br, active))
     return parts
 
 
@@ -469,7 +580,7 @@ def _join_inline(parts: list) -> str:
     return out
 
 
-def _inline_md(el, br: str = "<br>") -> str:
+def _inline_md(el, br: str = "<br>", active: frozenset = frozenset()) -> str:
     """行内感知的文本提取：strong/b 包成 **加粗**，跳过脚本样式。
 
     空白折叠为单个空格（保住英文单词边界），调用方对结果 strip()。
@@ -477,8 +588,9 @@ def _inline_md(el, br: str = "<br>") -> str:
     硬换行，且不产生物理换行——物理换行会让 #/-/2. 开头的段内行被
     generate_html 的块级正则误判成标题/列表）；列表项/表格单元格等
     单行语境传 " "；强调标签内部一律折叠为空格。
+    active 见 _inline_parts(嵌套同色不套娃)。
     """
-    return _join_inline(_inline_parts(el, br))
+    return _join_inline(_inline_parts(el, br, active))
 
 
 def _render_list(list_el, depth: int) -> list:
@@ -1324,7 +1436,11 @@ def generate_html(data: dict, img_files: list[str | None], img_dir: str, embed_i
         inline_html.append(m.group(0))
         return f"\uE010UTAG{len(inline_html) - 1}\uE011"
 
-    html_body = re.sub(r'</?u>|<br */?>', _stash_inline, html_body)
+    html_body = re.sub(
+        r'</?u>|<br */?>|</mark>|</span>|'
+        r'<mark style="background-color:#[0-9a-f]{6}(?:;color:#[0-9a-f]{6})?">|'
+        r'<span style="color:#[0-9a-f]{6}">',
+        _stash_inline, html_body)
 
     # XSS 防护：转义 markdown 里的裸文本 HTML 元字符（<script> 之类不能直通到输出）
     # 代码块已被占位符替换，转义不影响；后续 markdown 语法自己生成的 <h1><strong> 等标签
@@ -1332,6 +1448,8 @@ def generate_html(data: dict, img_files: list[str | None], img_dir: str, embed_i
     html_body = _html_lib.escape(html_body, quote=False)
 
     # 行内代码先锁住：`…` 里的星号等是字面内容,不能被后面的强调正则改写
+    # （已知边界:行内代码在转义后才锁住,其中与白名单同形的字面标签会直通,
+    #   与围栏代码不对称;后果仅样式级,见 2026-07-16 设计的接受声明）
     inline_code: list[str] = []
 
     def _stash_span(m):
@@ -1505,6 +1623,7 @@ h4 {{ font-size: 15px; margin: 16px 0 8px; color: #555; }}
 .content th {{ background: #f6f8fa; font-weight: 600; }}
 .content tbody tr:nth-child(even) {{ background: #fafbfc; }}
 .content u {{ text-decoration: underline; }}
+.content mark {{ color: #1a1a1a; padding: 0 2px; border-radius: 2px; }}
 .content em {{ font-style: italic; }}
 .content del {{ text-decoration: line-through; color: #999; }}
 .meta {{ color: #999; font-size: 13px; margin-bottom: 20px; padding-bottom: 16px; border-bottom: 1px solid #f0f0f0; }}
@@ -1545,6 +1664,7 @@ h4 {{ font-size: 15px; margin: 16px 0 8px; color: #555; }}
   .content th, .content td {{ border-color: #333; }}
   .content tbody tr:nth-child(even) {{ background: #222; }}
   .content del {{ color: #666; }}
+  .content mark {{ color: #1a1a1a; }}
   .meta {{ color: #999; border-color: #333; }}
   .author {{ color: #ccc; }}
   .badge {{ background: #2a2a2a; color: #ccc; }}

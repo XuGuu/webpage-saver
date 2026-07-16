@@ -858,6 +858,170 @@ class TestPreLineStructure(unittest.TestCase):
         self.assertIn("┌────┐\n│ 标题 │", out)
 
 
+class TestColorHighlight(unittest.TestCase):
+    """颜色与高亮保真(2026-07-16 设计):只留刻意强调,滤掉排版噪音。
+
+    判定规则:RGB 三通道差 ≥ 24 = 彩色(作者刻意)保留并规范化为 #hex;
+    黑白灰/透明/关键字 = 噪音丢弃。高亮底→<mark>,彩字→<span>,写进 md。
+    """
+
+    URL = "https://mp.weixin.qq.com/s/x"
+
+    # ---------- _keep_color 过滤器 ----------
+
+    def test_keep_color_chromatic_kept_and_normalized(self):
+        from save_webpage import _keep_color
+        self.assertEqual(_keep_color("color: rgb(235, 87, 87);"),
+                         {"color": "#eb5757"})
+        self.assertEqual(_keep_color("background-color: rgb(253, 236, 200);"),
+                         {"background-color": "#fdecc8"})
+
+    def test_keep_color_grayscale_dropped(self):
+        from save_webpage import _keep_color
+        self.assertIsNone(_keep_color("color: rgb(55, 53, 47);"))
+        self.assertIsNone(_keep_color("background-color: rgb(255,255,255);"))
+        self.assertIsNone(_keep_color("color: #333;"))
+
+    def test_keep_color_keywords_and_translucent_dropped(self):
+        from save_webpage import _keep_color
+        self.assertIsNone(_keep_color("background: none transparent !important;"))
+        self.assertIsNone(_keep_color("background-color: rgba(135,131,120,0.15);"))
+        self.assertIsNone(_keep_color("color: inherit;"))
+        self.assertIsNone(_keep_color(""))
+        self.assertIsNone(_keep_color(None))
+
+    def test_keep_color_background_shorthand_and_hex_forms(self):
+        from save_webpage import _keep_color
+        self.assertEqual(_keep_color("background: rgb(253,236,200) left top;"),
+                         {"background-color": "#fdecc8"})
+        self.assertEqual(_keep_color("color: #EB5757;"), {"color": "#eb5757"})
+        self.assertEqual(_keep_color("color: #e57;"), {"color": "#ee5577"})
+
+    # ---------- 输出形态 ----------
+
+    def test_highlight_span_becomes_mark(self):
+        html = make_page(
+            '<p><span style="background-color: rgb(253, 236, 200);">重点句</span></p>')
+        md = parse_wechat_html(html, self.URL)["markdown"]
+        self.assertEqual(md, '<mark style="background-color:#fdecc8">重点句</mark>')
+
+    def test_colored_strong_wraps_outside_emphasis(self):
+        html = make_page(
+            '<p><strong style="color: rgb(235, 87, 87);">红色重点</strong></p>')
+        md = parse_wechat_html(html, self.URL)["markdown"]
+        self.assertEqual(md, '<span style="color:#eb5757">**红色重点**</span>')
+
+    def test_default_near_black_produces_no_tags(self):
+        html = make_page('<p><span style="color: rgb(55, 53, 47);">普通文字</span></p>')
+        md = parse_wechat_html(html, self.URL)["markdown"]
+        self.assertEqual(md, "普通文字")
+
+    def test_colored_inline_code_keeps_color(self):
+        html = make_page(
+            '<p><code style="color: rgb(235, 87, 87);">grilling</code></p>')
+        md = parse_wechat_html(html, self.URL)["markdown"]
+        self.assertEqual(md, '<span style="color:#eb5757">`grilling`</span>')
+
+    def test_nested_same_color_not_doubled(self):
+        html = make_page(
+            '<p><span style="color: rgb(235,87,87);">'
+            '<span style="color: rgb(235,87,87);">红</span></span></p>')
+        md = parse_wechat_html(html, self.URL)["markdown"]
+        self.assertEqual(md.count("<span"), 1)
+
+    def test_highlight_plus_text_color_merge_into_one_mark(self):
+        html = make_page(
+            '<p><span style="background-color: rgb(253,236,200); '
+            'color: rgb(235,87,87);">双色</span></p>')
+        md = parse_wechat_html(html, self.URL)["markdown"]
+        self.assertEqual(
+            md, '<mark style="background-color:#fdecc8;color:#eb5757">双色</mark>')
+
+    # ---------- 渲染 ----------
+
+    def test_generate_html_passes_mark_and_span_through(self):
+        data = parse_wechat_html(make_page("<p>占位</p>"), self.URL)
+        data["markdown"] = ('<mark style="background-color:#fdecc8">重点</mark> 与 '
+                            '<span style="color:#eb5757">**红字**</span>')
+        html = generate_html(data, [], "")
+        self.assertIn('<mark style="background-color:#fdecc8">重点</mark>', html)
+        self.assertIn('<span style="color:#eb5757"><strong>红字</strong></span>', html)
+        self.assertIn(".content mark", html)
+
+    def test_malformed_rgba_does_not_crash(self):
+        """畸形透明度值(1.2.3 / .)静默丢弃,绝不让整篇保存崩溃。"""
+        from save_webpage import _keep_color
+        self.assertIsNone(_keep_color("color: rgba(235,87,87,1.2.3);"))
+        self.assertIsNone(_keep_color("color: rgba(235,87,87,.);"))
+
+    def test_whitespace_only_colored_span_keeps_word_gap(self):
+        """纯空白的彩色 span 不能被吞掉——英文词间距必须保住。"""
+        html = make_page(
+            '<p>left<span style="color: rgb(235,87,87);"> </span>right</p>')
+        md = parse_wechat_html(html, self.URL)["markdown"]
+        self.assertEqual(md, "left right")
+
+    def test_dark_background_not_marked(self):
+        """浅色门槛:深色背景(徽章类)不算荧光笔,降级为无样式。"""
+        from save_webpage import _keep_color
+        self.assertIsNone(_keep_color("background-color: rgb(200,40,40);"))
+        self.assertEqual(_keep_color("background-color: rgb(253,236,200);"),
+                         {"background-color": "#fdecc8"})
+
+    def test_nearest_ancestor_color_semantics(self):
+        """就近祖先去重:红→蓝→红,最内层的红要重新生效。"""
+        html = make_page(
+            '<p><span style="color: rgb(235,87,87);">红'
+            '<span style="color: rgb(60,120,216);">蓝'
+            '<span style="color: rgb(235,87,87);">又红</span></span></span></p>')
+        md = parse_wechat_html(html, self.URL)["markdown"]
+        self.assertIn('<span style="color:#eb5757">又红</span>', md)
+
+    def test_uppercase_rgb_kept_and_url_hex_ignored(self):
+        from save_webpage import _keep_color
+        self.assertEqual(_keep_color("color: RGB(235,87,87);"), {"color": "#eb5757"})
+        self.assertIsNone(_keep_color("background: url(icons.svg#a1b2c3);"))
+
+    def test_later_declaration_overrides_earlier(self):
+        """CSS 语义:同属性后声明覆盖前声明(白色覆盖黄底 → 无高亮)。"""
+        from save_webpage import _keep_color
+        self.assertIsNone(
+            _keep_color("background: rgb(253,236,200); background: white;"))
+
+    def test_colored_span_next_to_emphasis_guards_intact(self):
+        """色标签与星号防撞守卫共存:边界是 <>,不触发补空格。"""
+        html = make_page(
+            '<p><strong>加粗</strong><span style="color: rgb(235,87,87);">红</span></p>')
+        md = parse_wechat_html(html, self.URL)["markdown"]
+        self.assertEqual(md, '**加粗**<span style="color:#eb5757">红</span>')
+
+    def test_nested_different_colors_compose(self):
+        html = make_page(
+            '<p><span style="background-color: rgb(253,236,200);">黄底'
+            '<span style="color: rgb(235,87,87);">红字</span></span></p>')
+        md = parse_wechat_html(html, self.URL)["markdown"]
+        self.assertEqual(md, '<mark style="background-color:#fdecc8">黄底'
+                             '<span style="color:#eb5757">红字</span></mark>')
+
+    def test_dark_mode_mark_rule_present(self):
+        """亮色与暗色主题各有一条 .content mark 深字规则。"""
+        data = parse_wechat_html(make_page("<p>占位</p>"), self.URL)
+        data["markdown"] = "x"
+        html = generate_html(data, [], "")
+        self.assertEqual(html.count(".content mark"), 2)
+
+    def test_end_to_end_highlight_and_colored_code(self):
+        html_in = make_page(
+            '<p><span style="background-color: rgb(253, 236, 200);">'
+            '<strong>grill-me 本身只是个门面</strong></span>'
+            ',真正的机关藏在 <code style="color: rgb(235,87,87);">grilling</code> 里</p>')
+        data = parse_wechat_html(html_in, self.URL)
+        out = generate_html(data, [], "")
+        self.assertIn('<mark style="background-color:#fdecc8">'
+                      '<strong>grill-me 本身只是个门面</strong></mark>', out)
+        self.assertIn('<span style="color:#eb5757"><code>grilling</code></span>', out)
+
+
 class TestNestedList(unittest.TestCase):
     """嵌套列表(内容质量 #6)。"""
 
