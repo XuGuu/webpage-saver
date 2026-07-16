@@ -1,0 +1,79 @@
+# 颜色与高亮保真(公众号)设计
+
+日期:2026-07-16
+需求来源:用户对照原文 https://mp.weixin.qq.com/s/vsrHhF1l6rY0icBKbYaghA 发现保存版丢失了
+黄底高亮句、红色强调字等颜色信息,希望保存结果"像原文一样有颜色区分、有高亮"。
+
+## 事实基础(实测该文章)
+
+| 样式 | 出现次数 | 性质 |
+|------|---------|------|
+| 文字色 rgb(235,87,87) 红 | 16 | 作者刻意强调 |
+| 背景色 rgb(253,236,200) 米黄 | 25 | 作者荧光笔重点 |
+| 文字色 rgb(55,53,47) 等近黑 | 100+ | 编辑器默认色(噪音) |
+| 背景 white/transparent/浅灰 chip | 80+ | 排版噪音 |
+
+结论:原文样式 = 刻意强调 + 默认排版噪音的混合。**照搬全部样式会破坏暗色模式并使文件臃肿;
+必须过滤,只保留刻意强调。**(用户已确认此取舍)
+
+## 已确认的决策
+
+1. **保真范围:只留刻意强调**——彩色文字 + 非中性背景色;默认黑白灰全部过滤(用户选定)
+2. **.md 也带颜色**:用内嵌 `<mark>`/`<span>` 小标签写进 markdown,Typora/Obsidian 直接渲染,
+   LLM 对少量标签无感;架构上顺(HTML 由 md 生成)(用户选定)
+3. 方案选型:**A 精确保色 + 彩色/非彩色过滤**(否决 B 归一调色板——篡改作者用色;
+   否决 C 样式直通——安全面大、暗色模式失控)
+
+## 核心规则
+
+### 判定(纯函数 `_keep_color(style_str) -> dict | None`)
+
+- 从 style 属性解析 `color` 与 `background-color`/`background`
+  (`background` 简写从值里提取第一个 rgb()/#hex 形态的颜色 token,提不到即视为无背景色)
+- 值仅接受 `rgb(r,g,b)`、`rgba(r,g,b,a)`、`#rrggbb`、`#rgb`;
+  关键字(transparent/inherit/none/initial/unset)与其他格式(hsl 等)一律丢弃
+- rgba 的 a < 0.5 → 丢弃(近透明 = 淡淡的排版底,非强调)
+- **彩色判定:max(r,g,b) − min(r,g,b) ≥ 24 → 保留;否则(黑白灰)丢弃**
+  - 实测校验:米黄 253/236/200(差 53)✓、红 235/87/87(差 148)✓、
+    默认近黑 55/53/47(差 8)✗、白/浅灰 chip ✗
+- 保留的颜色**规范化为 `#rrggbb`**(丢 alpha),绝不透传原字符串
+
+### 输出形态(_inline_parts 内)
+
+- 元素带保留背景色 → 内容包 `<mark style="background-color:#xxxxxx">…</mark>`;
+  同时带保留文字色时合并进同一 mark:`<mark style="background-color:#xxxxxx;color:#xxxxxx">`
+- 仅保留文字色 → `<span style="color:#xxxxxx">…</span>`
+- 颜色标签包在 markdown 强调标记**外层**:`<span style="color:#eb5757">**文字**</span>`
+- 彩色行内代码:code 分支检查自身 style,产出 `` <span …>`code`</span> ``
+- 嵌套同色不套娃:内层元素与外层生效颜色完全一致时不再包
+- **代码块(pre)内部不保色**:语法高亮色杂,保持项目自有干净样式(用户知情)
+- 片段标记:颜色包装段在 `_inline_parts` 中标 syntactic=True(与 `<u>` 一致);
+  其边界字符是 `<`/`>`,不触发星号防撞与 CommonMark 边界守卫,行为中性
+
+### 渲染(generate_html)
+
+- 白名单 stash 正则扩展,仅放行**我们自己生成的精确形态**:
+  `</?u>|<br */?>|</mark>|</span>|<mark style="background-color:#[0-9a-f]{6}(?:;color:#[0-9a-f]{6})?">|<span style="color:#[0-9a-f]{6}">`
+- CSS:`.content mark { color:#1a1a1a; padding:0 2px; border-radius:2px; }`,
+  暗色模式下同样固定深色文字(浅色高亮底 + 深字,两种主题都可读);
+  彩色文字(span)不随主题变(饱和色深浅底均可读)
+- 已知边界(与 `<u>`/`<br>` 直通先例同类,接受):若文章**正文文本**恰好含有与
+  我们生成形态逐字符一致的字面标签,会被当作样式放行——后果仅是着色,
+  白名单形态不含任何脚本面
+
+## 实施步骤
+
+1. TDD:`_keep_color` 过滤器单测(彩色留/灰阶丢/关键字丢/低透明丢/规范化)
+2. TDD:输出形态测试(高亮→mark、彩字 strong→span 包 **、默认色→无标签、
+   彩色 code、嵌套同色不套娃、与星号防撞守卫共存)
+3. TDD:渲染测试(mark/span 白名单直通、CSS mark 规则存在、e2e 真实结构片段)
+4. 实现 `_keep_color` + `_inline_parts` 接色 + code 分支 + generate_html 白名单/CSS
+5. 全量回归 + 重存示例文章实测(黄底句、红色 grilling 可见)
+6. requesting-code-review → 修复确认项 → 提交推送
+
+## YAGNI 明确不做
+
+- 字号、对齐、字体等其他排版样式
+- 颜色语义归类/主题化调色板
+- 代码块内语法高亮保色
+- 旧文章批量迁移(重新保存即焕新)
