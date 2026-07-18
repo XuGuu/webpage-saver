@@ -499,6 +499,15 @@ def _inline_parts(el, br: str, active: frozenset = frozenset()) -> list:
             continue
         elif child.name == "br":
             parts.append((br, False))
+        elif child.get("data-formula"):
+            # 数学公式:LaTeX 源码就在 data-formula 属性里;svg 只是
+            # 渲染结果(纯路径+文字残渣),绝不向下遍历
+            latex = re.sub(r'\s+', ' ', child["data-formula"]).strip()
+            if latex:
+                if child.get("data-formula-type") == "block-equation":
+                    parts.append((f"$${latex}$$", True))
+                else:
+                    parts.append((f"${latex}$", True))
         elif child.name in ("strong", "b"):
             kept = _effective_color(child, active)
             sub = _merge_active(active, kept) if kept else active
@@ -661,6 +670,30 @@ def _make_soup(html: str):
         return BeautifulSoup(html, "lxml")
     except Exception:
         return BeautifulSoup(html, "html.parser")
+
+
+def _formula_svg_ok(svg) -> bool:
+    """公式 svg 消毒:白名单之外一律拒收。合法公式 svg 是纯静态路径。
+
+    拒收(降级为样式化 LaTeX 文本,内容不丢):
+    - script / foreignObject / style 元素(可注入脚本或全页 CSS/外联)
+    - SMIL 动画元素 set/animate*(属性值可注入 onload/href)
+    - on* 事件属性、href/xlink:href 链接引用
+    - style 属性里的 url(…)/expression(…)(外联画笔/追踪信标)
+    真实公式 svg 的 style 只有 vertical-align/width/height,不含 url。
+    """
+    if svg.find(["script", "foreignObject", "style",
+                 "set", "animate", "animatetransform", "animatemotion"]) is not None:
+        return False
+    for el in [svg] + svg.find_all(True):
+        for attr, val in el.attrs.items():
+            a = attr.lower()
+            if a.startswith("on") or a in ("href", "xlink:href"):
+                return False
+            if a == "style" and re.search(r'url\s*\(|expression\s*\(',
+                                          str(val), re.IGNORECASE):
+                return False
+    return True
 
 
 def _is_fake_heading(el) -> bool:
@@ -898,8 +931,17 @@ def parse_wechat_html(html: str, url: str = "") -> dict:
             if src and "mmbiz" in src and not src.startswith("data:"):
                 img_urls.append(src)
 
+    # 数学公式配对表:LaTeX 源码 → 原渲染 svg(消毒后),供 HTML 按源码查表嵌入
+    formulas = []
+    if content is not None:
+        for el in content.find_all(attrs={"data-formula": True}):
+            latex = re.sub(r'\s+', ' ', el.get("data-formula") or "").strip()
+            svg = el.find("svg")
+            if latex and svg is not None and _formula_svg_ok(svg):
+                formulas.append((latex, str(svg)))
+
     return {"title": title, "author": author, "date": date, "markdown": md,
-            "images": img_urls, "site": "公众号"}
+            "images": img_urls, "site": "公众号", "formulas": formulas}
 
 
 def extract_wechat(url: str) -> dict:
@@ -1496,6 +1538,40 @@ def generate_html(data: dict, img_files: list[str | None], img_dir: str, embed_i
 
     html_body = re.sub(r'```\n?(.*?)\n?```', _stash_code, html_body, flags=re.DOTALL)
 
+    # 行内代码先锁住(转义之前,先于公式/强调/白名单):`…` 里的 $、星号、
+    # <> 都是字面内容,不能被任何后续规则改写。恢复时再转义,与围栏代码对称
+    inline_code: list[str] = []
+
+    def _stash_span(m):
+        inline_code.append(m.group(1))
+        return f"C{len(inline_code) - 1}"
+
+    html_body = re.sub(r'``\s?(.+?)\s?``', _stash_span, html_body)
+    html_body = re.sub(r'`([^`\n]+)`', _stash_span, html_body)
+
+    # 数学公式先锁住(转义之前):LaTeX 里的 <>&_ 不能被转义/强调正则改写。
+    # 能按 LaTeX 源码配上原 svg 的直接嵌 svg(像素级还原,currentColor
+    # 自动适配暗色主题);配不上的降级为样式化 LaTeX 文本
+    _formula_map = {}
+    for _la, _sv in (data.get("formulas") or []):
+        _formula_map.setdefault(_la, _sv)
+    math_spans: list[str] = []
+
+    def _stash_math(m, block):
+        latex = re.sub(r'\s+', ' ', m.group(1)).strip()
+        svg = _formula_map.get(latex)
+        inner = svg if svg else _html_lib.escape(latex, quote=False)
+        cls = "formula formula-block" if block else "formula-inline"
+        math_spans.append(f'<span class="{cls}">{inner}</span>')
+        return f"M{len(math_spans) - 1}"
+
+    html_body = re.sub(r'\$\$([^$\n]+?)\$\$',
+                       lambda m: _stash_math(m, True), html_body)
+    # 行内 $…$:两侧防误伤——前置只挡 ASCII 字母数字(标识符/价格数字,
+    # 中文紧贴公式属正常写法不挡),内侧不贴空格,后非数字(价格 $100 不中招)
+    html_body = re.sub(r'(?<![\$A-Za-z0-9_])\$(?!\s)([^$\n]{1,300}?)(?<!\s)\$(?!\d)',
+                       lambda m: _stash_math(m, False), html_body)
+
     # 允许白名单标签直通：<u>…</u> 和 <br>（段内硬换行标记）先保护成占位符，转义后再放回
     inline_html: list[str] = []
 
@@ -1514,17 +1590,6 @@ def generate_html(data: dict, img_files: list[str | None], img_dir: str, embed_i
     # 是硬编码字面串，此后不会再被转义
     html_body = _html_lib.escape(html_body, quote=False)
 
-    # 行内代码先锁住：`…` 里的星号等是字面内容,不能被后面的强调正则改写
-    # （已知边界:行内代码在转义后才锁住,其中与白名单同形的字面标签会直通,
-    #   与围栏代码不对称;后果仅样式级,见 2026-07-16 设计的接受声明）
-    inline_code: list[str] = []
-
-    def _stash_span(m):
-        inline_code.append(m.group(1))
-        return f"C{len(inline_code) - 1}"
-
-    html_body = re.sub(r'``\s?(.+?)\s?``', _stash_span, html_body)
-    html_body = re.sub(r'`([^`\n]+)`', _stash_span, html_body)
 
     html_body = re.sub(r'^#### (.+)$', r'<h4>\1</h4>', html_body, flags=re.MULTILINE)
     html_body = re.sub(r'^### (.+)$', r'<h3>\1</h3>', html_body, flags=re.MULTILINE)
@@ -1604,9 +1669,13 @@ def generate_html(data: dict, img_files: list[str | None], img_dir: str, embed_i
     # 斜体、删除线（在 ** 之后，避免 * 被误当成一半的 **;两侧要非字/非星，避免误吞乘号）
     html_body = re.sub(r'(?<![\*\w])\*([^\*\n]+?)\*(?![\*\w])', r'<em>\1</em>', html_body)
     html_body = re.sub(r'~~(.+?)~~', r'<del>\1</del>', html_body)
-    # 放回行内代码（内容在转义之后锁住,本身已是安全文本）
+    # 放回数学公式(svg 已消毒;LaTeX 降级文本在锁住时已转义)
+    for _mi, _ms in enumerate(math_spans):
+        html_body = html_body.replace(f"M{_mi}", _ms)
+    # 放回行内代码（转义之前锁住的原文,恢复时才转义 → 与围栏代码对称)
     for _ci, _cs in enumerate(inline_code):
-        html_body = html_body.replace(f"C{_ci}", f"<code>{_cs}</code>")
+        html_body = html_body.replace(
+            f"C{_ci}", f"<code>{_html_lib.escape(_cs)}</code>")
     html_body = re.sub(r'!\[([^\]]*)\]\(([^\)]+)\)', r'<img src="\2" alt="\1" style="max-width:100%;border-radius:8px;margin:12px 0">', html_body)
     html_body = re.sub(r'\[([^\]]+)\]\(([^\)]+)\)', r'<a href="\2">\1</a>', html_body)
     html_body = re.sub(r'\n\n+', '</p><p>', html_body)
@@ -1691,6 +1760,12 @@ h4 {{ font-size: 15px; margin: 16px 0 8px; color: #555; }}
 .content tbody tr:nth-child(even) {{ background: #fafbfc; }}
 .content u {{ text-decoration: underline; }}
 .content mark {{ color: #1a1a1a; padding: 0 2px; border-radius: 2px; }}
+.content .formula-block {{ display: block; text-align: center; margin: 14px 0;
+                            overflow-x: auto; font-style: italic;
+                            font-family: Georgia, "Times New Roman", serif; }}
+.content .formula-inline {{ font-style: italic;
+                             font-family: Georgia, "Times New Roman", serif; }}
+.content .formula-block svg, .content .formula-inline svg {{ max-width: 100%; }}
 .content em {{ font-style: italic; }}
 .content del {{ text-decoration: line-through; color: #999; }}
 .meta {{ color: #999; font-size: 13px; margin-bottom: 20px; padding-bottom: 16px; border-bottom: 1px solid #f0f0f0; }}

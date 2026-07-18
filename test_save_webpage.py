@@ -1250,6 +1250,151 @@ class TestParserRobustnessHardening(unittest.TestCase):
         self.assertEqual(len(data["images"]), 1)
 
 
+class TestFormula(unittest.TestCase):
+    """数学公式保真(2026-07-18 GLM 文章回归:72 个公式全丢)。
+
+    微信公式组件把 LaTeX 源码存在 data-formula 属性里,svg 只是渲染
+    结果(纯路径,遍历只漏出 lex/feas 文字残渣)。
+    方案:.md 还原 $$块级$$/​$行内$ 标准数学语法;.html 按 LaTeX 查表
+    嵌入原 svg(像素级一致,currentColor 自动适配暗色),配不上降级为
+    样式化 LaTeX 文本;svg 严格消毒。
+    """
+
+    URL = "https://mp.weixin.qq.com/s/x"
+    BLOCK = ('<span class="span-block-equation"><section class="block-equation" '
+             'data-formula="W^* \\in \\arg\\max" data-formula-type="block-equation">'
+             '<svg viewbox="0 0 10 10"><text>残渣lex</text><path d="M1 1"/></svg>'
+             '</section></span>')
+    INLINE = ('<p>方案 <span class="inline-equation" data-formula="W = (W^{(1)})" '
+              'data-formula-type="inline-equation">'
+              '<svg viewbox="0 0 5 5"><path d="M2 2"/></svg></span> 表示</p>')
+
+    def test_block_equation_to_dollar_block(self):
+        """块级公式 → $$LaTeX$$,svg 文字残渣清零。"""
+        md = parse_wechat_html(make_page(self.BLOCK), self.URL)["markdown"]
+        self.assertIn("$$W^* \\in \\arg\\max$$", md)
+        self.assertNotIn("残渣", md)
+
+    def test_inline_equation_in_paragraph(self):
+        """行内公式 → $LaTeX$,与前后文字自然衔接。"""
+        md = parse_wechat_html(make_page(self.INLINE), self.URL)["markdown"]
+        self.assertEqual(md, "方案 $W = (W^{(1)})$ 表示")
+
+    def test_formulas_collected_with_svg(self):
+        """data['formulas'] 收集 (LaTeX, svg) 配对。"""
+        data = parse_wechat_html(make_page(self.BLOCK + self.INLINE), self.URL)
+        pairs = data["formulas"]
+        self.assertEqual(len(pairs), 2)
+        self.assertEqual(pairs[0][0], "W^* \\in \\arg\\max")
+        self.assertIn("<svg", pairs[0][1])
+
+    def test_html_embeds_svg_for_formulas(self):
+        """HTML:块级公式嵌原 svg(居中块),行内公式嵌行内 svg。"""
+        data = parse_wechat_html(make_page(self.BLOCK + self.INLINE), self.URL)
+        out = generate_html(data, [], "")
+        self.assertIn('class="formula formula-block"', out)
+        self.assertIn('class="formula-inline"', out)
+        self.assertEqual(out.count("<svg"), 2)
+        self.assertNotIn("$$", out)
+
+    def test_html_fallback_styled_latex_without_svg(self):
+        """配不上 svg 的公式:降级为样式化 LaTeX 文本,不留裸 $ 符。"""
+        data = parse_wechat_html(make_page("<p>占位</p>"), self.URL)
+        data["markdown"] = "能量 $E = mc^2$ 守恒"
+        data["formulas"] = []
+        out = generate_html(data, [], "")
+        self.assertIn('class="formula-inline">E = mc^2</span>', out)
+        self.assertNotIn("$E", out)
+
+    def test_svg_with_script_rejected(self):
+        """svg 带 <script> 或 on* 事件属性:拒收,公式走 LaTeX 降级。"""
+        bad = ('<p><span data-formula="x^2" data-formula-type="inline-equation">'
+               '<svg onload="evil()"><script>alert(1)</script><path d="M1 1"/>'
+               '</svg></span></p>')
+        data = parse_wechat_html(make_page(bad), self.URL)
+        self.assertEqual(data["formulas"], [])
+        out = generate_html(data, [], "")
+        body = out[out.find('<div class="content">'):]
+        self.assertNotIn("<script", body)
+        self.assertIn('class="formula-inline">x^2</span>', out)
+
+    def test_inline_formula_tight_after_cjk(self):
+        """紧贴中文的行内公式(得分$\\bar{r}_t$)也要识别——
+        前置守卫只挡 ASCII 字母数字(标识符/价格),不挡中文。"""
+        data = parse_wechat_html(make_page("<p>占位</p>"), self.URL)
+        data["markdown"] = "得分$\\bar{r}_t$越高越好"
+        data["formulas"] = []
+        out = generate_html(data, [], "")
+        self.assertIn('class="formula-inline">\\bar{r}_t</span>', out)
+
+    def test_svg_style_element_rejected(self):
+        """svg 内嵌 <style>(可注入全页 CSS/@import 外联)拒收。"""
+        bad = ('<p><span data-formula="a" data-formula-type="inline-equation">'
+               '<svg><style>@import url(https://evil/x.css);</style>'
+               '<path d="M1 1"/></svg></span></p>')
+        data = parse_wechat_html(make_page(bad), self.URL)
+        self.assertEqual(data["formulas"], [])
+
+    def test_svg_inline_style_url_rejected(self):
+        """元素 style 属性含 url((外联画笔/追踪信标)拒收。"""
+        bad = ('<p><span data-formula="a" data-formula-type="inline-equation">'
+               '<svg><path style="fill:url(https://evil/p.png)" d="M1 1"/>'
+               '</svg></span></p>')
+        data = parse_wechat_html(make_page(bad), self.URL)
+        self.assertEqual(data["formulas"], [])
+
+    def test_svg_smil_animation_rejected(self):
+        """SMIL 动画元素(可注入 onload/href 属性值)拒收——公式必然是静态的。"""
+        bad = ('<p><span data-formula="a" data-formula-type="inline-equation">'
+               '<svg><set attributeName="onload" to="evil()"/>'
+               '<path d="M1 1"/></svg></span></p>')
+        data = parse_wechat_html(make_page(bad), self.URL)
+        self.assertEqual(data["formulas"], [])
+
+    def test_inline_code_dollar_pair_stays_literal(self):
+        """行内代码里的 $x$ 是字面内容:不被公式抢走,不留占位符残渣。"""
+        data = parse_wechat_html(make_page("<p>占位</p>"), self.URL)
+        data["markdown"] = "运行 `$x$` 命令"
+        data["formulas"] = []
+        out = generate_html(data, [], "")
+        self.assertIn("<code>$x$</code>", out)
+        self.assertNotIn("", out)
+
+    def test_stray_double_dollars_do_not_swallow_paragraphs(self):
+        """孤立的 $$ 不得跨段落吞并正文(块级公式必须单行配对)。"""
+        data = parse_wechat_html(make_page("<p>占位</p>"), self.URL)
+        data["markdown"] = "段一 $$\n\n中间段落\n\n$$ 段三"
+        data["formulas"] = []
+        out = generate_html(data, [], "")
+        body = out[out.find('<div class="content">'):]
+        self.assertIn("中间段落", body)
+        self.assertNotIn("formula-block", body)
+
+    def test_many_formulas_no_placeholder_collision(self):
+        """公式数量上两位数时占位符不串号,正文里的 M1 字样不受牵连。"""
+        parts = ["M1 芯片评测"]
+        formulas = []
+        for i in range(12):
+            parts.append(f"指标$x_{{{i}}}$说明")
+            formulas.append((f"x_{{{i}}}", f'<svg data-i="{i}"><path d="M1 1"/></svg>'))
+        data = parse_wechat_html(make_page("<p>占位</p>"), self.URL)
+        data["markdown"] = " ".join(parts)
+        data["formulas"] = formulas
+        out = generate_html(data, [], "")
+        self.assertIn("M1 芯片评测", out)
+        for i in range(12):
+            self.assertIn(f'data-i="{i}"', out)
+
+    def test_literal_dollar_prices_not_formula(self):
+        """正文里的价格($100 和 $200)不被误判成公式。"""
+        data = parse_wechat_html(
+            make_page("<p>价格在 $100 和 $200 之间</p>"), self.URL)
+        out = generate_html(data, [], "")
+        body = out[out.find('<div class="content">'):]
+        self.assertIn("$100 和 $200", body)
+        self.assertNotIn("formula-inline", body)
+
+
 class TestNestedList(unittest.TestCase):
     """嵌套列表(内容质量 #6)。"""
 
