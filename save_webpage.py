@@ -649,6 +649,20 @@ def _render_list(list_el, depth: int) -> list:
     return lines
 
 
+def _make_soup(html: str):
+    """建 DOM 树:优先 lxml,不可用或解析失败时降级标准库 html.parser。
+
+    标准库解析器在真实公众号页面上会被页面模板里的裸 <img> 带偏,
+    把整篇正文塞进后续 img 元素的肚子(2026-07-18 实测);lxml 是
+    浏览器级容错,树建得对。lxml 本就是 trafilatura 的依赖,机器上现成。
+    """
+    from bs4 import BeautifulSoup
+    try:
+        return BeautifulSoup(html, "lxml")
+    except Exception:
+        return BeautifulSoup(html, "html.parser")
+
+
 def _is_fake_heading(el) -> bool:
     """判断 <section>/<p> 是不是靠样式冒充的伪标题。保守:短 + 加粗 + 无裸文字/其他子标签。"""
     from bs4 import NavigableString
@@ -757,6 +771,10 @@ def _collect_wechat_content(el, md_parts: list, img_urls: list):
             if src and "mmbiz" in src and not src.startswith("data:"):
                 img_urls.append(src)
                 md_parts.append(f"![图片{len(img_urls)}]({src})")
+            if child.contents:
+                # img 是空元素,不该有任何孩子(标签或裸文本);解析器建树
+                # 出错时整篇正文可能被塞进 img 肚子——照样递归,绝不陪葬
+                _collect_wechat_content(child, md_parts, img_urls)
         elif child.name in ("script", "style"):
             continue
         elif child.name == "pre":
@@ -818,9 +836,7 @@ def _collect_wechat_content(el, md_parts: list, img_urls: list):
 
 def parse_wechat_html(html: str, url: str = "") -> dict:
     """从公众号页面 HTML 解析出标题、作者、正文和图片。"""
-    from bs4 import BeautifulSoup
-
-    soup = BeautifulSoup(html, "html.parser")
+    soup = _make_soup(html)
 
     # 标题
     title = ""

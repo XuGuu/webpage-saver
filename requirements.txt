@@ -1,5 +1,6 @@
 requests
 beautifulsoup4
+lxml
 trafilatura
 curl_cffi
 DrissionPage

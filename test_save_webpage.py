@@ -1121,6 +1121,87 @@ class TestColorHighlight(unittest.TestCase):
         self.assertIn('<span style="color:#eb5757"><code>grilling</code></span>', out)
 
 
+class TestParserRobustness(unittest.TestCase):
+    """建树健壮性(2026-07-18 GLM 文章正文全丢回归)。
+
+    真实故障:微信页面模板(小说卡片组件)里一个裸 <img> 把标准库
+    html.parser 的建树带偏,整篇正文(25 万字节)被塞进正文区某个
+    img 元素的肚子——行走器把 img 当叶子,输出只剩 1 张图。
+    修复双层:①建树优先 lxml(浏览器级容错);②img 肚里有内容时
+    照样递归(纵深防御,任何解析器再犯错也不丢正文)。
+    """
+
+    URL = "https://mp.weixin.qq.com/s/x"
+
+    # 最小病根夹具:裸 <img>(页面模板)+ 正常正文,html.parser 必现
+    SICK = ('<html><head><title>t</title></head><body>'
+            '<h1 id="activity-name">t</h1>'
+            '<div class="novel-cover"><img>\n</div>'
+            '<div id="js_content"><section>'
+            '<img src="https://mmbiz.qpic.cn/a/640"/>'
+            '<p>正文文字甲</p><h2>小节</h2><p>正文文字乙</p>'
+            '</section></div></body></html>')
+
+    def test_bare_img_chrome_does_not_swallow_body(self):
+        """端到端:病根夹具下正文和图片都必须完整提取。"""
+        data = parse_wechat_html(self.SICK, self.URL)
+        self.assertIn("正文文字甲", data["markdown"])
+        self.assertIn("## 小节", data["markdown"])
+        self.assertIn("正文文字乙", data["markdown"])
+        self.assertEqual(len(data["images"]), 1)
+
+    def test_walker_recovers_content_swallowed_into_img(self):
+        """纵深防御:就算树建错了(img 肚里有内容),行走器也要递归救回。"""
+        from bs4 import BeautifulSoup
+        import save_webpage as sw
+        soup = BeautifulSoup(self.SICK, "html.parser")
+        content = soup.find("div", id="js_content")
+        if not any(im.find() is not None for im in content.find_all("img")):
+            self.skipTest("此环境的 html.parser 未复现病态树")
+        md_parts, imgs = [], []
+        sw._collect_wechat_content(content, md_parts, imgs)
+        joined = "\n\n".join(md_parts)
+        self.assertIn("正文文字甲", joined)
+        self.assertIn("正文文字乙", joined)
+        self.assertEqual(len(imgs), 1)
+
+
+class TestParserRobustnessHardening(unittest.TestCase):
+    """建树健壮性打磨(评审跟进):裸文本肚 + 降级链路端到端。"""
+
+    URL = "https://mp.weixin.qq.com/s/x"
+
+    def test_walker_recovers_text_only_belly(self):
+        """img 肚里只有裸文本(无任何标签)时同样救回。"""
+        from bs4 import BeautifulSoup, NavigableString
+        import save_webpage as sw
+        soup = BeautifulSoup(
+            '<div id="js_content"><img src="https://mmbiz.qpic.cn/a/640"/></div>',
+            "html.parser")
+        img = soup.find("img")
+        img.append(NavigableString("被吞的正文"))
+        md_parts, imgs = [], []
+        sw._collect_wechat_content(soup.find("div"), md_parts, imgs)
+        self.assertIn("被吞的正文", "\n\n".join(md_parts))
+
+    def test_fallback_parser_end_to_end_when_lxml_missing(self):
+        """lxml 缺席时:降级 html.parser + 纵深防御端到端救回正文(回归保险)。"""
+        from unittest.mock import patch
+        import bs4
+        real = bs4.BeautifulSoup
+
+        def fake(markup, features=None, **kw):
+            if features == "lxml":
+                raise bs4.FeatureNotFound("test: lxml blocked")
+            return real(markup, features, **kw)
+
+        with patch.object(bs4, "BeautifulSoup", fake):
+            data = parse_wechat_html(TestParserRobustness.SICK, self.URL)
+        self.assertIn("正文文字甲", data["markdown"])
+        self.assertIn("正文文字乙", data["markdown"])
+        self.assertEqual(len(data["images"]), 1)
+
+
 class TestNestedList(unittest.TestCase):
     """嵌套列表(内容质量 #6)。"""
 
