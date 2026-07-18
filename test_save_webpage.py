@@ -1109,6 +1109,54 @@ class TestColorHighlight(unittest.TestCase):
         md = parse_wechat_html(html, self.URL)["markdown"]
         self.assertEqual(md, "a</mark><mark b")
 
+    def test_heading_intentional_color_kept(self):
+        """标题自带彩色(如 #773098 紫)→ 标题文字包色标签。"""
+        html = make_page('<h2 style="color: #773098;">第一阶段</h2>')
+        md = parse_wechat_html(html, self.URL)["markdown"]
+        self.assertIn('## <span style="color:#773098">第一阶段</span>', md)
+
+    def test_heading_default_color_stays_plain(self):
+        """标题是默认黑灰色 → 照旧素面,不包标签。"""
+        html = make_page('<h3 style="color: rgb(51,51,51);">普通标题</h3>')
+        md = parse_wechat_html(html, self.URL)["markdown"]
+        self.assertIn("### 普通标题", md)
+        self.assertNotIn("普通标题</span>", md)
+
+    def test_heading_color_renders_and_toc_stays_plain(self):
+        """端到端:标题颜色进正文 <h2>,浮动目录条目保持纯文字。"""
+        data = parse_wechat_html(
+            make_page('<h2 style="color: #773098;">第一阶段</h2><p>正文</p>'),
+            self.URL)
+        out = generate_html(data, [], "")
+        self.assertIn('<span style="color:#773098">第一阶段</span>', out)
+        nav = out[out.find("<nav"):out.find("</nav>") + 6]
+        self.assertIn("第一阶段", nav)
+        self.assertNotIn("<span style", nav)
+
+    def test_heading_color_on_whole_text_inner_wrapper(self):
+        """颜色藏在包住整个标题文字的内层元素(如 h4 里的 strong)也要接住。
+
+        真实病例:示例文章 8 个 h4 自身素面,紫色在内层 strong 上。
+        """
+        html = make_page(
+            '<h4><strong style="color: #773098;">训练期的工作流</strong></h4>')
+        md = parse_wechat_html(html, self.URL)["markdown"]
+        self.assertIn('#### <span style="color:#773098">训练期的工作流</span>', md)
+
+    def test_heading_interior_newline_normalized(self):
+        """标题内部换行折叠为空格:不被块切分产生跨块的不闭合标签。"""
+        html = make_page('<h2 style="color: #773098;">第一行\n第二行</h2>')
+        md = parse_wechat_html(html, self.URL)["markdown"]
+        self.assertIn('## <span style="color:#773098">第一行 第二行</span>', md)
+
+    def test_heading_with_light_background_renders_mark(self):
+        """标题带浅色高亮底:mark 形态穿过标题正则进 <h2>(回归保险)。"""
+        data = parse_wechat_html(
+            make_page('<h2 style="background-color: rgb(253,236,200);">高亮标题</h2>'),
+            self.URL)
+        out = generate_html(data, [], "")
+        self.assertIn('<mark style="background-color:#fdecc8">高亮标题</mark>', out)
+
     def test_end_to_end_highlight_and_colored_code(self):
         html_in = make_page(
             '<p><span style="background-color: rgb(253, 236, 200);">'

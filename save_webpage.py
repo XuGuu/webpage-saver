@@ -786,10 +786,21 @@ def _collect_wechat_content(el, md_parts: list, img_urls: list):
                 md_parts.append(f"```\n{code}\n```")
         elif child.name in _HEADING_TAGS and child.find("img") is None:
             # 标题：h1→#、h2→##……h4 以下封顶为 ####
-            text = child.get_text(strip=True)
+            # 内部换行折叠为空格:标题必须单行,否则色标签会被块切分撕开
+            text = re.sub(r'\s+', ' ', child.get_text(strip=True))
             if text:
                 level = min(int(child.name[1]), 4)
-                md_parts.append("#" * level + " " + text)
+                # 标题的刻意颜色复用成色规则;默认黑灰照旧素面。
+                # 颜色可能在标题元素自身,也可能在包住整个标题文字的
+                # 内层元素上(真实病例:h4 素面、紫色在内层 strong)
+                kept = _keep_color(child.get("style"))
+                if not kept:
+                    for sub in child.find_all(True):
+                        if re.sub(r'\s+', ' ', sub.get_text(strip=True)) == text:
+                            kept = _keep_color(sub.get("style"))
+                            if kept:
+                                break
+                md_parts.append("#" * level + " " + _wrap_color(text, kept))
         elif _is_fake_heading(child):
             # 样式冒充的伪标题（短 + 加粗）→ 三级标题
             text = child.get_text(strip=True)
